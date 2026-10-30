@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# PyInstaller 产物
+build/
+dist/
+*.spec.bak
+
+# 运行期数据（本地任务/历史/设置，不纳入版本库）
+data/
+*.log
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 打包分发的压缩包
+*.zip
