@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.10"
+VERSION = "1.9.9.12"
 
 
 # ----------------------------------------------------------------- 配色
@@ -6293,40 +6293,54 @@ def _single_instance_register(on_show, root0):
 
 
 def _ensure_desktop_shortcut():
-    """首次运行在桌面生成打开快捷方式（v1.9.8，仅 Windows 打包版）。
-    已存在就跳过；任何失败静默（不打扰使用）。
-    v1.9.9.1：PowerShell 派生挪进后台线程——Windows 上 AV 有时会拖慢
-    进程创建，不能让它占 UI 线程哪怕一瞬。"""
-    if os.name != "nt" or not getattr(sys, "frozen", False):
+    """首次运行在桌面 + 程序目录生成快捷方式（v1.9.8 起，仅 Windows）。
+    v1.9.9.12：彻底解决「快捷方式图标不是最新版」——
+      ① 显式 IconLocation 指向 assets/icon.ico（不用 exe 内嵌的旧图标）
+      ② 每次启动无条件重建（旧 lnk 不会自己更新）
+      ③ 重建后主动刷新 Windows 图标缓存（否则资源管理器仍显示旧图）
+    任何失败静默，绝不打扰使用。"""
+    if os.name != "nt":
         return
 
     def _mk():
         try:
             desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-            # v1.9.9.8：打包 exe 旁边也放一个快捷方式（用户要求首次运行
-            # 就在源文件路径留一份）。脚本运行时用 main.py 所在目录。
             if getattr(sys, "frozen", False):
                 progdir = os.path.dirname(sys.executable)
+                target = sys.executable
             else:
                 progdir = os.path.dirname(os.path.abspath(__file__))
+                # 源码运行：快捷方式指向 pythonw.exe + main.py，
+                # 双击不弹黑框（python.exe 会留一个控制台窗口）
+                pw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+                target = pw if os.path.isfile(pw) else sys.executable
             targets = [d for d in (desktop, progdir)
                        if d and os.path.isdir(d)]
             if not targets:
                 return
-            target = sys.executable
-            workdir = os.path.dirname(target) if getattr(
-                sys, "frozen", False) else progdir
-            ps = ""
+            # 图标文件：优先 assets/icon.ico，缺失则退回 exe/png
+            ico = os.path.join(progdir, "assets", "icon.ico")
+            if not os.path.isfile(ico):
+                png = os.path.join(progdir, "assets", "icon.png")
+                ico = png if os.path.isfile(png) else ""
+            icon_part = ("$s.IconLocation='%s,0';" % ico) if ico else ""
+            ps = "$ws=New-Object -ComObject WScript.Shell;"
             for d in targets:
                 lnk = os.path.join(d, "每日记事本.lnk")
-                if os.path.exists(lnk):
-                    continue
-                ps += ("$s=(New-Object -ComObject WScript.Shell)"
-                       ".CreateShortcut('%s');"
-                       "$s.TargetPath='%s';$s.WorkingDirectory='%s';"
-                       "$s.Save();" % (lnk, target, workdir))
-            if not ps:
-                return
+                ps += ("$s=$ws.CreateShortcut('%s');"
+                       "$s.TargetPath='%s';" % (lnk, target))
+                if getattr(sys, "frozen", False):
+                    ps += "$s.WorkingDirectory='%s';" % progdir
+                else:
+                    ps += ("$s.Arguments='\"%s\"';"
+                           "$s.WorkingDirectory='%s';"
+                           % (os.path.join(progdir, "main.py"), progdir))
+                ps += icon_part + "$s.Save();"
+            # ③ 刷新图标缓存：让资源管理器重新读取 lnk 的图标
+            #   ie4uinit.exe -show 会重建 iconcache，比手删 db 安全
+            ps += ("try{Start-Process -FilePath ie4uinit.exe "
+                   "-ArgumentList '-show' -WindowStyle Hidden -Wait "
+                   "-ErrorAction SilentlyContinue}catch{}")
             subprocess.Popen(["powershell", "-NoProfile", "-WindowStyle",
                               "Hidden", "-Command", ps])
         except Exception:

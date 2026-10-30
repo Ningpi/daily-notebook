@@ -27,6 +27,14 @@ if errorlevel 1 (
 )
 
 echo 正在启动 每日记事本 ...
+rem v1.9.9.12：优先用 pythonw.exe 启动，不弹黑色控制台窗口
+set "PYW="
+for /f "delims=" %%i in ('where pythonw 2^>nul') do if not defined PYW set "PYW=%%i"
+if defined PYW (
+    start "" "%PYW%" "%~dp0main.py"
+    exit /b 0
+)
+
 python main.py
 if errorlevel 1 (
     echo.
