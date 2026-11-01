@@ -1,7 +1,22 @@
 # 萌新向 GitHub 上传指南（超详细版）
 
 > 面向第一次上传项目的人。每一步都写了「你会看到什么」和「该确认什么」。
-> **耗时**：约 20 分钟，其中 10 分钟是等下载安装。
+> **总耗时**：约 25 分钟（含 10 分钟等 Git 安装、3 分钟等打包）。
+
+**全程路线**（照着顺序做，中途不要跳）：
+
+| 步骤 | 做什么 | 耗时 |
+|---|---|---|
+| 第 0 步 | 搞清楚数据隐私问题 | 2 分钟 |
+| 第 1 步 | 装 Git | 10 分钟 |
+| 第 2 步 | GitHub 建空仓库 | 2 分钟 |
+| 第 3 步 | 上传前体检（防隐私泄露） | 1 分钟 |
+| 第 4 步 | 首次推送代码 | 3 分钟 |
+| 第 5 步 | 认证（填 Token） | 2 分钟 |
+| 第 6 步 | 验证代码传上去了 | 1 分钟 |
+| **第 7 步** | **打包 exe 并发布，让别人能直接下载** | **5 分钟** |
+| 第 8 步 | 以后怎么更新 | — |
+| 第 9 步 | 报错了查这里 | — |
 
 ---
 
@@ -444,7 +459,7 @@ branch 'main' set up to track 'origin/main'.
 
 - 顶部是 **README 渲染出来的介绍页**，有标题、功能列表、截图
 - 文件列表里有 `main.py`、`parser.py`、`assets`、`tests` 等
-- **没有 `data` 文件夹**（有的话见第 8 章 Q5）
+- **没有 `data` 文件夹**（有的话见第 9 章 Q5）
 
 2. **滚动 README 检查图片**：主界面截图应能正常显示。
 
@@ -458,9 +473,293 @@ python  tkinter  todo  chinese-nlp  desktop-app
 
 ---
 
-# 第 7 步：以后改了代码怎么更新
+# 第 7 步：发布 exe 让别人直接下载（约 5 分钟）
 
-## 7.1 三条命令的节奏
+> 做完第 6 步，代码已经在 GitHub 上了。但访客点进来看到的是**源码**，
+> 想用得先装 Python、开命令行——这门槛劝退 90% 的人。
+> 这一步把打包好的 `每日记事本.exe` 挂到 **Releases**，别人点两下就能用。
+
+## 7.1 先搞清楚：为什么 exe 不进仓库
+
+`每日记事本.exe` 大约 **15–20 MB**，直接提交进仓库有三个问题：
+
+| 问题 | 说明 |
+|---|---|
+| 仓库暴涨 | 每次打包生成新 exe，Git 会把**每一版**都存下来，几百 MB 很快就堆满 |
+| 克隆变慢 | 别人 `git clone` 要下整个历史，包括所有旧 exe |
+| 硬性限制 | 单文件超 100 MB，GitHub 直接拒收 |
+
+所以标准做法是——**代码进仓库，成品进 Releases**。Releases 的附件单个最大支持 2 GB，永久保存，还能写更新说明。
+
+> ⚠️ **exe 必须在 Windows 上打包**。Mac / Linux 打不出 Windows 的 exe。
+> 手上没有 Windows 电脑？看 7.7 的「自动打包」方案，让 GitHub 的服务器替你打。
+
+## 7.2 在 Windows 上打包
+
+### 前置检查
+
+在项目文件夹里打开 cmd：
+
+```bash
+python --version
+python -c "import tkinter; print('tkinter ok')"
+```
+
+**你该看到**：
+
+```
+Python 3.12.1
+tkinter ok
+```
+
+**报错的话**：去 https://www.python.org/downloads/windows/ 重装，安装时勾选 **Add python.exe to PATH**。别用 Microsoft Store 版本的 Python（缺 tkinter）。
+
+### 执行打包
+
+双击 **`打包.bat`**。它会自动：检查环境 → 安装 PyInstaller（首次需联网，约 1 分钟）→ 打包（1–3 分钟）。
+
+**你该看到**：
+
+```
+[1/2] 安装 / 更新 PyInstaller（首次需要联网，请稍等）...
+[2/2] 正在打包，约需 1~3 分钟...
+...
+============================================
+  打包完成！
+  EXE 位置：dist\每日记事本.exe
+============================================
+```
+
+最后自动弹出 `dist` 文件夹。
+
+### 打包后必须验一次
+
+双击 `dist\每日记事本.exe`，确认三件事：
+
+- ✅ 能正常启动，界面完整，**图标是新版**
+- ✅ 输入一句话能创建任务
+- ✅ 关掉程序再打开，**刚才的任务还在**（说明数据能正常存）
+
+**启动就闪退？** 临时把 `每日记事本.spec` 里的 `console=False` 改成 `True`，重新打包，就能在命令行里看到报错了。
+
+## 7.3 创建 Release
+
+### 打开页面
+
+浏览器访问：
+
+```
+https://github.com/你的用户名/daily-notebook/releases
+```
+
+或者在仓库主页右侧边栏找 **Releases**。
+
+点 **Draft a new release**。
+
+### 填写区 1：Choose a tag
+
+点 **Choose a tag** 下拉框，输入：
+
+```
+v1.9.9.15
+```
+
+下拉框里会出现 **Create new tag: v1.9.9.15 on publish**，点它。
+
+> **命名规则**：前面带 `v`，数字和 `main.py` 里的 `VERSION` 保持一致，方便对照。
+> 以后每次发新版递增：v1.9.9.16、v1.9.9.17……
+
+### 填写区 2：Target
+
+保持默认 `main`。
+
+### 填写区 3：Release title
+
+```
+每日记事本 v1.9.9.15
+```
+
+或者带上亮点：
+
+```
+v1.9.9.15 · 气泡任务条统一宽度
+```
+
+### 填写区 4：Describe this release
+
+这是访客最先读的文字。直接复制这个模板改：
+
+```markdown
+## 下载
+
+点下方 **Assets** 里的 `每日记事本.exe` 下载，双击即用。
+
+- 免安装、无需 Python、完全离线、无广告
+- 系统要求：Windows 10 / 11（64 位）
+
+## 本次更新
+
+- 气泡任务条改为统一宽度，长任务名自动加宽，左右边缘对齐
+- 压缩任务名与截止时间之间的空隙
+- 新增上传前体检脚本
+
+## 关于杀毒软件误报
+
+本程序用 PyInstaller 打包，可能被个别杀软标记。源码完全公开可查，
+如遇误报请添加信任，或直接下载源码自行运行。
+```
+
+支持 Markdown（`##` 标题、`-` 列表、`**粗体**`）。
+
+### 填写区 5：Attach binaries（关键一步）
+
+页面底部有个虚线框写着：
+
+```
+Attach binaries by dropping them here or selecting them.
+```
+
+**两种方式任选**：
+
+- 用鼠标把 `dist\每日记事本.exe` **拖进**那个框
+- 或点框里的 **selecting them**，在文件对话框里选中它
+
+**你该看到**：进度条走完，框里显示文件名和大小（约 15–20 MB）。
+
+> ⚠️ **上传期间别关页面**。传完刷新发现附件没了，说明没传成功，重来一次。
+
+### 发布
+
+确认下面几项，然后点页面底部绿色按钮 **Publish release**：
+
+- [ ] tag 是 `v1.9.9.15`（带 v）
+- [ ] 标题填了
+- [ ] 说明填了，且写清了「下载哪个文件」
+- [ ] 虚线框里能看到 exe，大小正常
+
+没准备好可以先点 **Save draft** 存草稿，之后再回来发。
+
+## 7.4 验证发布成功
+
+发布后跳到 Release 详情页，检查：
+
+- 顶部显示 `v1.9.9.15`，旁边有绿色 `Latest` 标签
+- 中间是你写的说明（已渲染成排版）
+- 底部 **Assets** 区域列出：
+
+```
+Source code (zip)
+Source code (tar.gz)
+每日记事本.exe        18.2 MB
+```
+
+**用无痕窗口**（Ctrl+Shift+N）打开这个页面，点一下 exe 下载，确认能下、能跑。这一步是为了确认「陌生人」也能拿到文件。
+
+## 7.5 把下载链接写进 README（必做）
+
+不做这步，访客根本找不到 Releases。在 `README.md` **最顶部**加一段：
+
+```markdown
+## 下载
+
+**[⬇ 下载 Windows 免安装版](../../releases/latest)**
+
+解压后双击 `每日记事本.exe` 即可，无需安装 Python。
+```
+
+> 注意用的是**相对路径** `../../releases/latest`，它永远指向最新版本，
+> 以后发新版**完全不用改 README**。
+
+改完推送：
+
+```bash
+git add README.md
+git commit -m "docs: 添加下载链接"
+git push
+```
+
+刷新仓库首页，顶部应该出现一个可点击的下载链接。
+
+## 7.6 以后发新版的流程
+
+每次改完代码，重复这四步（约 5 分钟）：
+
+```bash
+# ① 推代码
+git add .
+git commit -m "feat: 新功能说明"
+git push
+```
+
+```bash
+# ② 改版本号
+#   main.py 里          VERSION = "1.9.9.16"
+#   version_info.txt 里 1, 9, 9, 16
+```
+
+```
+③ 双击 打包.bat，重新打包
+```
+
+```
+④ 打开 releases/new，tag 填 v1.9.9.16，拖入新 exe，Publish
+```
+
+> **省事技巧**：在旧 Release 页点 **Edit**，改版本号和说明，重新传文件也行；但从新建页面走更规范。
+
+## 7.7 没有 Windows 电脑怎么办
+
+### 方案 A：GitHub Actions 自动打包（推荐，已配好）
+
+项目里已经有 `.github/workflows/build-windows.yml`，推到 GitHub 后自动生效：
+
+**触发方式一：打 tag**
+```bash
+git tag v1.9.9.16
+git push --tags
+```
+GitHub 会用 Windows 服务器自动打包，并**自动创建 Release、自动上传 exe**。你什么都不用做。
+
+**触发方式二：手动**
+仓库 **Actions** 标签页 → 左侧选「打包 Windows EXE」→ 右侧 **Run workflow** → 跑完在页面底部 Artifacts 里下载 exe。
+
+> 首次运行如果报权限错误，去仓库 **Settings** → **Actions** → **General** → 底部 **Workflow permissions** 选 **Read and write permissions**，保存后重跑。
+
+### 方案 B：找朋友代打
+
+把项目 zip 发给有 Windows 的朋友，让他双击 `打包.bat`，把 `dist\每日记事本.exe` 发回给你。
+
+### 方案 C：先只发源码
+
+README 里写清「需要 Python 3.10+，双击 `启动.bat`」。门槛高些，但完全合法，很多 Python 项目都这样。
+
+## 7.8 常见问题
+
+**Q：Release 页面找不到 Attach binaries 那个框**
+
+页面往下滚到底。或者换 Chrome / Edge 浏览器（有些老浏览器拖拽上传不工作）。
+
+**Q：exe 传上去下载后文件名变成 `%E6%AF%8F...`**
+
+GitHub 对中文附件名的处理问题。介意的话，打包后把 exe 改名为 `DailyNotebook.exe` 再上传，或者打个 zip 一起传。
+
+**Q：杀毒软件报毒 / Windows Defender 拦截**
+
+PyInstaller 打包程序的常见现象（未签名 + 自解压特征）。`每日记事本.spec` 里已设 `upx=False`，能显著降低误报。在 Release 说明里加一句解释（模板里已写）即可。彻底解决要买代码签名证书（一年几百上千元），个人项目没必要。
+
+**Q：想更新已发布的 Release 里的 exe**
+
+进 Release 页点 **Edit release**，在 Attach binaries 区域删除旧文件、拖入新的，点 **Update release**。
+
+**Q：不小心发错版本号了**
+
+Release 页点 **Edit** → 改 tag（会同步改 tag 名）→ Update release。或者删掉这个 Release 和对应 tag 重来。
+
+---
+
+# 第 8 步：以后改了代码怎么更新
+
+## 8.1 三条命令的节奏
 
 在项目文件夹里打开 cmd（地址栏输入 `cmd` 回车），执行：
 
@@ -474,7 +773,7 @@ git push
 
 > 不需要再写 `-u origin main`，第一次已建立关联。
 
-## 7.2 写提交说明的建议
+## 8.2 写提交说明的建议
 
 `-m` 后面的文字会永久留在项目历史里，别写 "1"、"update"、"修改"。
 
@@ -485,11 +784,11 @@ git push
 | 文档 | `docs: 更新使用说明` |
 | 样式 | `style: 调整按钮间距` |
 
-## 7.3 提交节奏
+## 8.3 提交节奏
 
 **每完成一个小功能或修完一个 bug 就提交一次**。这样提交历史就是一份开发日记，看的人能理解你每一步在做什么。
 
-## 7.4 发布可下载的 exe（可选）
+## 8.4 发布可下载的 exe
 
 exe 有几十 MB，不适合直接进仓库。用 **Releases** 发布：
 
@@ -503,7 +802,7 @@ exe 有几十 MB，不适合直接进仓库。用 **Releases** 发布：
 
 ---
 
-# 第 8 步：常见问题排错
+# 第 9 步：常见问题排错
 
 ## 认证类
 
@@ -607,7 +906,7 @@ git config --global --unset https.proxy
 
 ---
 
-# 第 9 步：推送前最后检查清单
+# 第 10 步：推送前最后检查清单
 
 全部打勾再按 `git push`：
 
@@ -619,6 +918,18 @@ git config --global --unset https.proxy
 - [ ] `git config user.name` 和 `user.email` 都填了
 - [ ] Token 已生成并存进记事本
 - [ ] 程序已关闭（可选，但推荐）
+
+**第 7 步（发布 exe）发布前：**
+
+- [ ] 代码已经 `git push` 上去了（tag 要从提交上打）
+- [ ] `dist\每日记事本.exe` 已生成，双击能正常运行
+- [ ] exe 图标是新版、任务能存住（关掉重开还在）
+- [ ] Release 的 tag 写成 `v版本号`（带 v，与 VERSION 一致）
+- [ ] 说明里写清了「下载哪个文件、怎么用」
+- [ ] exe 已拖进 Attach binaries 且大小正常（15–20 MB）
+- [ ] 点了 **Publish release**（不是草稿）
+- [ ] 用无痕窗口试下载，确认陌生人也能拿到
+- [ ] README 顶部有 `../../releases/latest` 下载链接
 
 ---
 
@@ -646,6 +957,13 @@ git push
 git status                            # 当前有哪些改动
 git log --oneline                     # 提交历史
 git remote -v                         # 远程地址
+
+# —— 打包与发布 ——
+python --version                      # 确认 Python 可用
+python -c "import tkinter; print('ok')"   # 确认 tkinter 可用
+（双击 打包.bat）                      # 生成 dist\每日记事本.exe
+git tag v1.9.9.16                     # 打版本标签
+git push --tags                       # 推标签（触发 Actions 自动出包）
 
 # —— 常用修复 ——
 git config --global core.quotepath false   # 中文不乱码
