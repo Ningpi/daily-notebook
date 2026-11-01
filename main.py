@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.14"
+VERSION = "1.9.9.15"
 
 
 # ----------------------------------------------------------------- 配色
