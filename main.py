@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.12"
+VERSION = "1.9.9.13"
 
 
 # ----------------------------------------------------------------- 配色
@@ -902,22 +902,33 @@ class Bubble(object):
             f_row = None
 
         def _need(t):
+            """v1.9.9.13：单行「内容净宽」= 色条3 + 标题padx16 + 标题宽
+            + (间隔·+时间宽) —— 不再带 56px 基线和 20px 富余，
+            中缝压缩到固定 8px。"""
             dl = self._dl_text(t)
-            # 左侧色条3 + 标题padx 8 + 右侧小字 padx 2+8 + 边框4 ≈ 25，
-            # 基线 56 再留余量；上限 460，超宽时截标题保时间完整
             if f_row is not None:
-                extra = (f_row.measure(" · " + dl) + 20) if dl else 0
+                extra = (f_row.measure("· " + dl) + 8) if dl else 0
                 tw = f_row.measure(t["title"])
             else:
-                extra = (len(dl) * round(7 * fsc) + 36) if dl else 0
+                extra = (len(dl) * round(7 * fsc) + 8) if dl else 0
                 tw = len(t["title"]) * round(13 * fsc)
-            return max(120, min(460, 56 + tw + extra)), tw, extra
-        for i, t in enumerate(undone[:8]):      # 最多铺 8 条，多了显示省略
-            w, _tw, _extra = _need(t)
-            _cap = 460 - 56 - (_extra if _extra else 0)
+            return 27 + tw + extra
+
+        # v1.9.9.13：先对全部行预计算，取最大值作为统一宽度——
+        # 所有行左右边缘对齐；最长行超 460 时截它的标题，其余行跟随
+        rows_data = undone[:8]      # 最多铺 8 条，多了显示省略
+        needs = [_need(t) for t in rows_data]
+        uni_w = max(needs) if needs else 120
+        _capped = uni_w > 460
+        uni_w = max(120, min(460, uni_w))
+        for i, t in enumerate(rows_data):
             disp = t["title"]
             try:
-                if _tw + _extra + 56 > 460 and f_row is not None:
+                if _capped and f_row is not None \
+                        and needs[i] > 460:
+                    _cap = 460 - 27 - (needs[i] - 27
+                                       - (f_row.measure(t["title"])
+                                          if f_row is not None else 0))
                     disp = self.app.ellipsize(disp, f_row, max(40, _cap))
             except Exception:
                 pass
@@ -963,7 +974,9 @@ class Bubble(object):
             try:
                 # v1.9.9.7：任务条右对齐气泡右缘，并夹在屏幕内——
                 # 之前以气泡左缘为起点向右铺，条一宽右半截就出屏了
-                rw = w + 20
+                # v1.9.9.13：rw 用统一宽度 uni_w（预计算好的最宽行），
+                # 不再逐行独立；+6 为外框余量
+                rw = uni_w + 6
                 _sw = row.winfo_screenwidth()
                 rx = base_x + self.win.winfo_width() - rw
                 rx = max(8, min(rx, _sw - rw - 8))
