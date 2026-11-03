@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.16"
+VERSION = "1.9.9.17"
 
 
 # ----------------------------------------------------------------- 配色
@@ -677,7 +677,7 @@ class Bubble(object):
         self.expanded = False
         self._rows = []
         # 大小可拖拽调节（记在 store.bubble_w，60~160px，高度等比）
-        self.W = int(getattr(app.store, "bubble_w", 84) or 84)
+        self.W = int(getattr(app.store, "bubble_w", 100) or 100)  # v1.9.9.17: 84→100
         self.W = max(60, min(220, self.W))
         self.H = max(28, round(self.W * 40 / 84))
         win = tk.Toplevel(app.root)
@@ -1229,8 +1229,9 @@ class NoteApp(object):
         sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
         w = int(sw / 6)
         h = int(sh / 3)
-        w = max(250, min(w, 460))
-        h = max(150, min(h, 340))
+        # v1.9.9.17：默认最小尺寸 250x300 → 320x420（任务列表+聊天区太挤）
+        w = max(320, min(w, 460))
+        h = max(420, min(h, 480))
         x = sw - w - int(sw * 0.012)
         y = int(sh * 0.055)
         # 恢复上次关闭前的位置和大小
@@ -5366,7 +5367,7 @@ class NoteApp(object):
         return None
 
     def _ring_bell(self, win):
-        """系统铃声：播放 C:\Windows\Media 的真实音效文件，线程里响不卡界面"""
+        r"""系统铃声：播放 C:\Windows\Media 的真实音效文件，线程里响不卡界面"""
         mode = getattr(self.store, "bell_mode", "chime")
 
         def _bell_once():
@@ -6229,32 +6230,45 @@ class NoteApp(object):
 _SINGLE_PORT = 27190
 
 def _single_instance_register(on_show, root0):
-    """尝试成为唯一实例。成功返回 socket（保活）；已有实例在跑则
-    通知它显示窗口并返回 None。
+    """尝试成为唯一实例。成功返回 (socket, serve)；已有实例在跑则
+    通知它显示窗口并返回 (None, None)。
 
-    v1.9.9.1 关键修复：accept 彻底移出 UI 线程。
-    v1.9.9 曾把带 0.2s 超时的 accept 放在 Tk 主线程的 after 回调里——
-    实测 Windows 上仍可能因杀毒软件钩住 socket 调用 / select 延迟，
-    把主循环卡住数秒（→「未响应」）。现在：
-      · 后台守护线程阻塞式 accept（线程里阻塞无所谓）；
-      · 收到 show 后只往线程安全队列塞一个标记；
-      · UI 线程用 after 每 300ms 非阻塞地取队列（queue.get_nowait）。
-    UI 线程从此不碰任何 socket。
+    v1.9.9.1 关键修复：accept 彻底移出 UI 线程（后台线程阻塞 accept，
+    UI 线程用 after 每 300ms 非阻塞取队列）。
+
+    v1.9.9.17 修复「双击 exe 没反应」：原逻辑端口被占 → 发 show →
+    连接也失败（端口被僵尸进程占据）→ 静默退出。现在改为：发 show
+    失败后等 0.5 秒尝试**接管**端口（SO_REUSEADDR=1），接管成功就
+    照常启动，只有真的接管不了才退出。
     """
-    try:
+    def _bind():
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind(("127.0.0.1", _SINGLE_PORT))
         srv.listen(2)
+        return srv
+
+    srv = None
+    try:
+        srv = _bind()
     except OSError:
-        # 端口被占 → 已有实例：通知它亮出窗口
+        # 端口被占 → 通常已有实例：通知它亮出窗口
+        notified = False
         try:
             c = socket.create_connection(("127.0.0.1", _SINGLE_PORT), timeout=1)
             c.sendall(b"show")
             c.close()
+            notified = True
         except Exception:
-            pass
-        return None, None
+            notified = False
+        if notified:
+            return None, None
+        # show 也没送出去 → 大概率是僵尸进程占着端口。等 0.5 秒尝试接管
+        time.sleep(0.5)
+        try:
+            srv = _bind()
+        except OSError:
+            return None, None
 
     import queue as _q, threading as _th
     show_q = _q.Queue()
@@ -6303,7 +6317,6 @@ def _single_instance_register(on_show, root0):
             pass
 
     return srv, serve
-
 
 def _ensure_desktop_shortcut():
     """首次运行在桌面 + 程序目录生成快捷方式（v1.9.8 起，仅 Windows）。

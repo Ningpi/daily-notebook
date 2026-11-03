@@ -308,3 +308,39 @@ class TestShiNotClock:
         got = core.parse_tasks("两小时后提醒我")[0]
         assert got[0] == "提醒我", got
         assert got[1] is None, got          # 不该有 hhmm
+
+
+class TestV19917QA:
+    """v1.9.9.17：QA 报告修复回归"""
+
+    def test_short_title_with_time_kept(self):
+        """「凌晨两点睡」：标题被清洗成噪音但带时间信号 → 不能丢弃"""
+        r = core.parse_tasks("凌晨两点睡")
+        assert r and r[0][1] == "02:00", r
+        assert "睡" in r[0][0], r
+
+    def test_pure_time_still_dropped(self):
+        """只说时间不说事，仍然不建任务"""
+        assert core.parse_tasks("九点") == []
+        assert core.parse_tasks("23:45") == []
+
+    def test_every_prefix_removed(self):
+        """「每周一开周会」标题不应残留「每」"""
+        r = core.parse_tasks("每周一开周会")
+        assert r and "每开" not in r[0][0] and "开周会" in r[0][0], r
+
+    def test_urgent_words_stack(self):
+        """多个紧急词叠加要进紧急档"""
+        s = core.score_task("送医院", "马上救急送医院", None)
+        assert s >= 75, s
+
+    def test_soon_duration_boosts_score(self):
+        """「15分钟后」没有钟点也要因临近加分"""
+        r = core.parse_tasks("15分钟后交报告")
+        assert r and r[0][2] >= 55, r
+
+    def test_repeated_noise_no_garbage_title(self):
+        """重复噪音段不该合成怪标题"""
+        r = core.parse_tasks("九点钟九点钟九点钟")
+        for t in r:
+            assert len(set(t[0])) > 1 or len(t[0]) == 1, r

@@ -23,7 +23,7 @@ IMPORTANT_WORDS = {
 }
 URGENT_WORDS = {
     "马上": 26, "立刻": 26, "立即": 26, "火速": 26, "赶紧": 22, "尽快": 20,
-    "加急": 24, "紧急": 26, "现在就": 24,
+    "加急": 24, "紧急": 26, "现在就": 24, "救急": 24, "急救": 24, "急诊": 24,
 }
 RELAX_WORDS = {
     "有空": -18, "顺便": -16, "随便": -14, "不急": -20, "以后": -14,
@@ -573,9 +573,10 @@ MID_NOISE = ["麻烦你", "麻烦", "请帮我", "帮我一下", "谢谢你", "�
 
 def clean_title(text, hits=()):
     t = text or ""
-    for h in hits:
-        if h:
-            t = _cut_at(t, [(m.start(), m.end()) for m in re.finditer(re.escape(h), t)])
+    # v1.9.9.17：先切最长的时间词（「每周一」要在「周一」之前切，
+    # 否则短的先切掉、长的就找不到了，标题残留「每」）
+    for h in sorted([h for h in hits if h], key=len, reverse=True):
+        t = _cut_at(t, [(m.start(), m.end()) for m in re.finditer(re.escape(h), t)])
     # 去掉所有时间表达（点/分钟/日期/时段）；数量词先保护起来
     t, _bag = _protect_qty(t)
     # ⚠「3号电池」「5号楼」「2号会议室」里的「N号」是序号不是日期，
@@ -694,10 +695,13 @@ def score_task(title, raw, hhmm, passed=False, day_offset=0):
         if _contains(seq, w):
             imp = max(imp, IMPORTANT_WORDS[w])
     s += imp * 0.9
-    for w in URGENT_WORDS:
-        if _contains(seq, w):
-            s += URGENT_WORDS[w] * 0.8
-            break
+    # v1.9.9.17：多个紧急词同时出现要叠加（马上+救急=明确紧急），
+    # 之前只取第一个就 break，「马上救急送医院」到不了紧急档
+    _urgent_hits = [w for w in URGENT_WORDS if _contains(seq, w)]
+    for w in _urgent_hits:
+        s += URGENT_WORDS[w] * 0.8
+    if len(_urgent_hits) >= 2:
+        s += 15          # 叠加奖励：两个以上紧急词直接拉进紧急档
     for w in RELAX_WORDS:
         if _contains(seq, w):
             s += RELAX_WORDS[w]
@@ -949,9 +953,43 @@ def parse_tasks(text, fallback=True):
         _hit_extra = []
         if dur_raw:
             _hit_extra.append(dur_raw + "后")
-        title = clean_title(seg, [t[2] for t in times] + _hit_extra +
+        # v1.9.9.17：时间词前面紧贴的「每」要一起清（每周一 → 周一），
+        # 否则 clean_title 只删「周一」，标题里残留「每」
+        _t_hits = [t[2] for t in times]
+        for _h in list(_t_hits):
+            _mh = re.search(r"每" + re.escape(_h), seg)
+            if _mh:
+                _t_hits.append(_mh.group(0))
+        title = clean_title(seg, _t_hits + _hit_extra +
                             [r for r in (dur_raw, due_raw) if r])
         if _is_noise(title):
+            # v1.9.9.17：整段都是同一字重复（钟钟钟/水水水）→ 纯噪音，
+            # 直接丢弃，不并进上一条污染标题
+            if len(clean_seg) >= 2 and len(set(clean_seg)) == 1:
+                continue
+            # v1.9.9.17：标题被清洗成噪音（「凌晨两点睡」→「睡」），
+            # 但段里带着有效时间/时长/日期信号 → 不能静默丢弃，
+            # 用原段保底成任务，否则用户的合法输入直接消失
+            if prev is None:
+                _fb_times = find_times(seg)
+                _fb_dur = find_duration(seg)[0]
+                _fb_due = find_deadline_date(seg)[0]
+                # 保底还需满足：时间词之外还有实义内容（如「凌晨两点睡」
+                # 的「睡」）。只说「九点」这种纯时间不算任务
+                _extra = seg.strip()
+                for _h in [t[2] for t in _fb_times] + \
+                          [r for r in (find_duration(seg)[1],
+                                       find_deadline_date(seg)[1]) if r]:
+                    _extra = _extra.replace(_h, "", 1)
+                _extra = re.sub(r"[\s，,。.：:；!！?？~～]+", "", _extra)
+                if (_fb_times or _fb_dur or _fb_due) and len(_extra) >= 1:
+                    _fb_title = seg.strip()[:6] or "待办"
+                    _fb_hhmm = _fb_times[0][0] if _fb_times else None
+                    results.append((_fb_title, _fb_hhmm,
+                                    score_task(_fb_title, seg, _fb_hhmm),
+                                    seg, _fb_dur, find_repeat(seg), _fb_due))
+                    prev = len(results) - 1
+                    continue
             if prev is not None:
                 prev_t = results[prev]
                 t0, h0, raw0 = prev_t[0], prev_t[1], prev_t[3]
@@ -971,8 +1009,22 @@ def parse_tasks(text, fallback=True):
         if title in seen:
             continue
         seen.add(title)
-        results.append((title, hhmm, score_task(title, seg, hhmm, passed, offset), seg, dur,
-                        find_repeat(seg), due_d))
+        # v1.9.9.17：「15分钟后」「半小时后」没有钟点 hhmm，走不到
+        # score_task 里的临近加分。按时长给临近度加分，别让紧急的事
+        # 沉到「一般」档
+        _soon = 0
+        _m = re.search(r"(\d+(?:\.\d+)?)\s*(分钟|小时|秒)", str(dur or ""))
+        if _m:
+            _amt = float(_m.group(1))
+            if _m.group(2) == "秒" or (_m.group(2) == "分钟" and _amt <= 30):
+                _soon = 28
+            elif _m.group(2) == "分钟" and _amt <= 60:
+                _soon = 16
+            elif _m.group(2) == "小时" and _amt <= 2:
+                _soon = 12
+        results.append((title, hhmm,
+                        min(100, score_task(title, seg, hhmm, passed, offset) + _soon),
+                        seg, dur, find_repeat(seg), due_d))
         prev = len(results) - 1
     if not results and fallback:
         # 兜底：一句朴素的话（如「去超市买牛奶」）也当一件任务
