@@ -24,6 +24,8 @@ IMPORTANT_WORDS = {
 URGENT_WORDS = {
     "马上": 26, "立刻": 26, "立即": 26, "火速": 26, "赶紧": 22, "尽快": 20,
     "加急": 24, "紧急": 26, "现在就": 24, "救急": 24, "急救": 24, "急诊": 24,
+    # v1.9.9.19：口语急迫说法（「买牛奶 很急」原来完全不得分）
+    "很急": 26, "好急": 26, "太急": 26, "特急": 26, "十分紧急": 30,
 }
 RELAX_WORDS = {
     "有空": -18, "顺便": -16, "随便": -14, "不急": -20, "以后": -14,
@@ -60,7 +62,7 @@ JOIN_VERBS = ["然后", "接着", "还有", "另外", "以及", "之后", "并�
               "顺便", "再", "完了以后", "完了"]
 TAIL_FILLERS = ["必须", "一定要", "务必", "记得", "要", "去", "得"]
 TRAIL_WORDS = ["一下", "吧", "啊", "哦", "呢", "呀", "了", "哈", "嘛", "啦"]
-LEAD_WORDS = ["的", "帮我", "请", "麻烦", "记得", "别忘了", "去", "先",
+LEAD_WORDS = ["的", "帮我", "请", "麻烦", "记得", "别忘了", "先",
               "我想", "我打算", "我准备", "我需要", "我要",
               "想要", "打算", "准备", "需要", "想", "得", "我得", "今天想", "今天我",
               "记得要", "别忘记了", "帮忙", "帮我个忙", "我想要", "今天需要",
@@ -423,9 +425,12 @@ def find_times(text):
     # 4) 星期：周三之前 / 星期五 / 下周一 -> 18:00（当天结束前）
     #    ⚠ 只在「没有任何真实钟点」时才兜底；像「周五晚上十点前洗漱」
     #    已有 22:00，不能再让星期兜底的 18:00 排在前面抢走 hhmm
+    #    v1.9.9.19：「周六上午去银行」里有真实时段词（上午→09:00）时
+    #    也不追加 18:00，否则 18:00 按位置排在前面，提醒定到傍晚
     wdelta, wraw = find_weekday(text)
     has_clock = any(("点" in raw or ":" in raw) for _h, _hm, _pos, raw in out)
-    if wdelta is not None and not has_clock:
+    _has_period = any(raw in PERIOD_HINTS for _h, _hm, _pos, raw in out)
+    if wdelta is not None and not has_clock and not _has_period:
         out.append(("18:00", (18, 0), 0, wraw))
 
     if not out:
@@ -608,6 +613,18 @@ MID_NOISE = ["麻烦你", "麻烦", "请帮我", "帮我一下", "谢谢你", "�
 
 def clean_title(text, hits=()):
     t = text or ""
+    # v1.9.9.19：「9:00-11:00开会」的区间里两个时间 hit 被分别切掉后，
+    # 残留「-」和半截数字（→「00-11开会」）。先把「时间-连接-时间」
+    # 整段剥掉，四种连接符（- / ~ / 到 / 至）都覆盖。
+    _RT = (r"(?:\d{1,2}\s*[:：]\s*\d{1,2}|(?:\d{1,2}|[%s]{1,3})\s*(?:点|時|时)"
+           r"(?:\s*(?:钟|半|一刻|两刻|二刻|三刻|\d{1,2}\s*分?))?)" % CN_DIGIT)
+    t = re.sub(r"(?:上午|下午|中午|早上|早晨|晚上|傍晚|夜里|凌晨)?\s*"
+               r"%s\s*(?:到|至|-|~|～|—)\s*%s" % (_RT, _RT), " ", t)
+    # v1.9.9.19：句尾优先级短语整体剥掉（「9点开会 很重要」→「开会」）。
+    # 只剥句尾，避免误伤「买重要文件」「重要客户到访」这类正文。
+    # 必须在程度词删除之前做：否则 DEGREE_WORDS 先删「很」剩孤字「重」。
+    _PRI = r"(?:非常重要|十分紧急|特别重要|很重要|很紧急|很急|好急|太急|特急|重要|紧急|要紧|火急|加急|急)"
+    t = re.sub(r"[\s，,]*" + _PRI + r"\s*$", " ", t)
     # v1.9.9.18：算式（1+1=2 / 3*4 / 15/3）先整体保护起来。否则
     # BARE_NUM_RE 会把孤立的数字剥掉，只剩「+=」这种残缺标题。
     t, _math_bag = _protect_math(t)
@@ -771,6 +788,20 @@ def score_task(title, raw, hhmm, passed=False, day_offset=0):
         s += URGENT_WORDS[w] * 0.8
     if len(_urgent_hits) >= 2:
         s += 15          # 叠加奖励：两个以上紧急词直接拉进紧急档
+    # v1.9.9.19：用户**亲口**说「紧急/很急/马上」时保底进相应档，
+    # 否则「买牛奶 很急」30+21=51 还是「一般」，急迫表达完全没生效。
+    # 强急词（紧急/很急…）保底紧急档；弱急词（马上/赶紧…）保底重要档；
+    # 明确说「很重要/非常重要」保底重要档。
+    _STRONG_URGENT = {"紧急", "很急", "好急", "太急", "特急", "火速", "加急",
+                      "现在就", "救急", "急救", "急诊", "十分紧急"}
+    if _urgent_hits:
+        if set(_urgent_hits) & _STRONG_URGENT:
+            s = max(s, 78)
+        else:
+            s = max(s, 60)
+    elif any(_contains(seq, w) for w in ("非常重要", "很重要", "特别重要",
+                                         "最重要", "要紧")):
+        s = max(s, 60)
     for w in RELAX_WORDS:
         if _contains(seq, w):
             s += RELAX_WORDS[w]
@@ -857,6 +888,14 @@ def repeat_due_today(rep, d=None):
 # ---------------------------------------------------------------- 分句
 def split_segments(text):
     pat = "|".join(re.escape(x) for x in SPLIT_TOKENS) + "|" + "|".join(re.escape(x) for x in JOIN_VERBS)
+    text = text or ""
+    # v1.9.9.19：「~」「～」「—」「-」都是分割符/残留源，「9:00~11:00」
+    # 会在 re.split 前就被拆开，区间保护形同虚设。先把「时间-时间」
+    # 区间的连接符统一归一成「到」（「到」不是分割符），区间就能
+    # 完整走到后面的保护逻辑。
+    _T = (r"(?:\d{1,2}\s*[:：]\s*\d{1,2}|(?:\d{1,2}|[%s]{1,3})\s*(?:点|時|时)"
+          r"(?:\s*(?:钟|半|一刻|两刻|二刻|三刻|\d{1,2}\s*分?))?)" % CN_DIGIT)
+    text = re.sub(r"(%s)\s*(?:[~～\-—]|~)\s*(%s)" % (_T, _T), r"\1到\2", text)
     segs = []
     for part in re.split(pat, text):
         part = (part or "").strip()
@@ -1070,6 +1109,24 @@ def _parse_dur_amount(text):
     return 0, None
 
 
+def _is_priority_mod(seg):
+    """整段只是一个优先级修饰语（很重要 / 非常紧急 / 马上 / 不急 …）
+
+    v1.9.9.19：「9点开会 很重要」里的「很重要」被空格拆成独立段后，
+    原来命中 NOT_TASK_WHOLE 直接丢弃，优先级完全没生效。现在识别出
+    这类段，把分数并进上一条任务。"""
+    t = re.sub(r"[\s，,。.！!？?~～]+", "", seg or "")
+    if not t or len(t) > 6:
+        return False
+    t = re.sub(r"^(?:这个任务|这件事|这事|它|这个|这个|那个)", "", t)
+    for w in list(IMPORTANT_WORDS) + list(URGENT_WORDS) + list(RELAX_WORDS):
+        if t == w or t == w + "的" or t == "很" + w or t == "非常" + w \
+                or t == "特别" + w or t == "挺" + w or t == "太" + w:
+            return True
+    return bool(re.fullmatch(r"(?:非常|特别|很|挺|好|太|真的|超)?"
+                             r"(?:重要|紧急|要紧|急|火急|加急|不急|马上|立刻|立即|赶紧|尽快)的?", t))
+
+
 def _soon_bonus(seg, dur):
     """「15分钟后 / 半小时之内 / 2小时内」这类**截止**表达的临近加分。
 
@@ -1129,6 +1186,16 @@ def parse_tasks(text, fallback=True):
             seg = core   # 没有上一条时，把「的」前半段当任务本体
         clean_seg = re.sub(r"[\s，,。.：:；!！?？~～]+", "", seg)
         if len(clean_seg) < 2 or clean_seg in NOT_TASK_WHOLE:
+            # v1.9.9.19：单独成段的优先级修饰语（「9点开会 很重要」里的
+            # 「很重要」、「写作业 马上」里的「马上」）不丢弃，把分数并进
+            # 上一条任务——标题一个字都不动，只改排序。
+            if prev is not None and _is_priority_mod(clean_seg):
+                prev_t = results[prev]
+                t0, h0 = prev_t[0], prev_t[1]
+                raw_new = prev_t[3] + " " + clean_seg
+                results[prev] = (t0, h0, score_task(t0, raw_new, h0), raw_new,
+                                 prev_t[4], prev_t[5],
+                                 prev_t[6] if len(prev_t) > 6 else None)
             continue
         times = find_times(seg)
         hhmm, passed, offset = (times[0][0], times[0][1], times[0][3]) if times else (None, False, 0)

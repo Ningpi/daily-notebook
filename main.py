@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.18"
+VERSION = "1.9.9.19"
 
 
 # ----------------------------------------------------------------- 配色
@@ -2834,7 +2834,8 @@ class NoteApp(object):
         _lv = re.match(r"^\s*([ABCD])\s*$", (text or "").strip(), re.I)
         if _lv:
             ok = True
-        _lv_score = {"A": 95, "B": 75, "C": 55, "D": 30}.get(
+        # v1.9.9.19：与手动菜单档位对齐（95/70/45/20），保证颜色一致
+        _lv_score = {"A": 95, "B": 70, "C": 45, "D": 20}.get(
             _lv.group(1).upper()) if _lv else None
         # 队列里还有别的过期任务待确认 → 交回 respond 前先决定
         _queue = (pe or {}).get("queue") or []
@@ -3082,7 +3083,11 @@ class NoteApp(object):
                     letter = "C"
                 else:
                     letter = "D"
-            scores = {"A": 95, "B": 75, "C": 55, "D": 30}
+            # v1.9.9.19：分数与手动菜单（lv*25-5 = 95/70/45/20）对齐。
+            # 原来 B=75、C=55 正好压在 priority_label 的档位线上（≥75 红、
+            # ≥55 橙），对话里选「重要」显示红色、「一般」显示橙色，
+            # 和手动调整的颜色对不上。
+            scores = {"A": 95, "B": 70, "C": 45, "D": 20}
             task["score"] = scores[letter]
             task["manual"] = True
             replies.append(tr("pri_set", t=task["title"], p=tr(table[letter])))
@@ -4047,7 +4052,8 @@ class NoteApp(object):
                 letter_m = _re_ad.search(r"(?<![A-Za-z])([ABCD])(?![A-Za-z])",
                                          title, _re_ad.I)
             if letter_m:
-                scores = {"A": 95, "B": 75, "C": 55, "D": 30}
+                # v1.9.9.19：与手动菜单档位对齐（见 _handle_pending 的同注释）
+                scores = {"A": 95, "B": 70, "C": 45, "D": 20}
                 score = scores[letter_m.group(1).upper()]
                 title = _re_ad.sub(r"[，,、；;]?\s*[ABCD]\s*$", "", title).strip() or title
             similar = self._find_similar(title)
@@ -5584,7 +5590,9 @@ class NoteApp(object):
                  wraplength=264, justify="left").pack(anchor="w", padx=14, pady=(12, 4))
         label, pcolor = core.priority_label(task.get("score", 0))
         # 优先级值带档位色，一眼分清急缓（v1.9.7）
-        rows = [(tr("menu_priority"), label, pcolor)]
+        # v1.9.9.19：行标签从「调整优先级」改成「优先级」——原来复用
+        # 右键菜单的 menu_priority，读起来像能在这里调优先级
+        rows = [(tr("pri_label"), label, pcolor)]
         if task.get("hhmm"):
             rows.append((tr("due_at", d=""), task["hhmm"], None))
             # 剩余时间：今天的任务给出「还有多久」，已过给出提示（v1.9.7）
@@ -6390,6 +6398,36 @@ def _ensure_desktop_shortcut():
         _mk()
 
 
+_MUTEX_NAME = "DailyNotebook_SingleInstance_Mutex"
+_MUTEX_HANDLE = None        # 进程存活期间持有，退出即由系统释放
+
+
+def _win_mutex_try():
+    """Windows 命名互斥量单实例判据（v1.9.9.19）。
+
+    端口判据在 Windows 上不可靠：SO_REUSEADDR 让两个进程同时 bind
+    成功，不带又可能被残留连接的 TIME_WAIT 卡住。互斥量由内核保证
+    一次只有一个进程持有，进程退出（哪怕被强杀）自动释放。
+    返回 True=我是首个实例（句柄存全局，进程存活期间持有）；
+    False=已有实例；None=非 Windows 或创建失败（退回端口判据）。"""
+    global _MUTEX_HANDLE
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.CreateMutexW(None, False, _MUTEX_NAME)
+        if not h:
+            return None
+        # ERROR_ALREADY_EXISTS = 183：互斥量已存在 → 已有实例在跑。
+        # 句柄仍要保存：持有它才能让「是否存在」的语义一直成立。
+        already = k32.GetLastError() == 183
+        _MUTEX_HANDLE = h
+        return not already
+    except Exception:
+        return None
+
+
 def _probe_existing_instance():
     """启动最早期判断「是不是已经有实例在跑」。
 
@@ -6404,7 +6442,9 @@ def _probe_existing_instance():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     ok = False
     try:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # v1.9.9.19：探针**不带** SO_REUSEADDR——Windows 上带了这个选项
+        # 就算端口已被别的实例持有也能 bind 成功，探针误报「free」，
+        # 重复双击会白建整套界面（QA 实测命中）。绑定失败才是「被占」。
         s.bind(("127.0.0.1", _SINGLE_PORT))
         s.listen(2)
         ok = True
@@ -6436,6 +6476,17 @@ def main():
             pass
 
     # v1.9.9.18：先探单实例，命中就直接退出（毫秒级），不再白建整个界面
+    # v1.9.9.19：Windows 优先用命名互斥量判据（端口判据在 Windows 的
+    # SO_REUSEADDR 语义下会误报 free）。互斥量说已有实例 → 通知已有
+    # 实例亮窗口后立即返回，界面一个控件都不建。
+    if _win_mutex_try() is False:
+        try:
+            c = socket.create_connection(("127.0.0.1", _SINGLE_PORT), timeout=1)
+            c.sendall(b"show")
+            c.close()
+        except Exception:
+            pass
+        return
     _probe, _early_srv = _probe_existing_instance()
     if _probe == "exists":
         return

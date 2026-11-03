@@ -396,6 +396,15 @@ class TestV1992Fixes:
         assert "_edge_motion" in app.root.bind("<B1-Motion>") or True
 
     def test_key_fallback_skips_inline_editor(self, app):
+        # v1.9.9.19：显式重置对话状态——前面的用例可能留着未答完的追问
+        # （remind/expired/pending_task），不重置的话本用例单独跑过、
+        # 整套跑挂（顺序依赖）
+        app._pending_task = None
+        app._pending_remind = None
+        app._pending_expired = None
+        app._pending_dup = None
+        app._pending_q = None
+
         class Evt:
             keysym, char = "a", "a"
         say(app, "买牛奶")

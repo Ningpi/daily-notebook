@@ -429,3 +429,68 @@ class TestV19918QA:
         """「两刻钟后开会」= 30 分钟 → 紧急"""
         r = core.parse_tasks("两刻钟后开会")
         assert r and r[0][0] == "开会" and r[0][2] >= 75, r
+
+
+class TestV19919QA:
+    """v1.9.9.19：第三轮 QA 修复回归"""
+
+    def test_dash_range_all_connectors(self):
+        """「时间-时间」四种连接符都识别为区间，标题干净"""
+        for s in ("9:00-11:00开会", "9:00到11:00开会", "9点到11点开会",
+                  "9:00~11:00开会", "9:00至11:00开会", "14:00-15:30体检"):
+            r = core.parse_tasks(s)
+            assert len(r) == 1, (s, r)
+            assert "00-1" not in r[0][0] and "-" not in r[0][0], (s, r[0][0])
+
+    def test_tilde_split_still_works(self):
+        """无时间的 ~ 仍作分隔符"""
+        r = core.parse_tasks("看电影~逛街")
+        assert len(r) == 2, r
+
+    def test_trailing_priority_words(self):
+        """句尾优先级短语：只改分数不动标题"""
+        r = core.parse_tasks("9点开会 很重要")
+        assert r and r[0][0] == "开会", r
+        r = core.parse_tasks("9点开会 紧急")
+        assert r and r[0][0] == "开会", r
+        r = core.parse_tasks("买牛奶很急")
+        assert r and r[0][0] == "买牛奶", r
+
+    def test_henji_scored_urgent(self):
+        """「很急」要真正进紧急档"""
+        r = core.parse_tasks("买牛奶 很急")
+        assert r and r[0][2] >= 75, r
+
+    def test_mashang_important_floor(self):
+        """「马上」保底重要档"""
+        r = core.parse_tasks("写作业 马上")
+        assert r and 55 <= r[0][2] < 75, r
+
+    def test_priority_word_in_body_kept(self):
+        """正文里的「重要」不被误删"""
+        r = core.parse_tasks("买重要文件")
+        assert r and r[0][0] == "买重要文件", r
+
+    def test_weekday_period_not_18(self):
+        """「周六上午去银行」按上午 9 点提醒，不是 18:00"""
+        for s, want in (("周六上午去银行", "09:00"), ("周日晚上聚餐", "20:00"),
+                        ("周五下午交周报", "15:00"), ("下周三中午吃饭", "12:00")):
+            r = core.parse_tasks(s)
+            assert r and r[0][1] == want, (s, r)
+
+    def test_weekday_no_period_still_18(self):
+        """只有星期没有时段 → 仍兜底 18:00"""
+        r = core.parse_tasks("周六去银行")
+        assert r and r[0][1] == "18:00", r
+
+    def test_verb_kept_in_title(self):
+        """「去银行」「去超市买牛奶」标题保留动词"""
+        assert core.parse_tasks("周六上午去银行")[0][0] == "去银行"
+        assert core.parse_tasks("去超市买牛奶")[0][0] == "去超市买牛奶"
+
+    def test_manual_priority_scores_aligned(self):
+        """对话设置优先级的分数与手动菜单档位一致（95/70/45/20）"""
+        import re as _re
+        src = open("main.py", encoding="utf-8").read()
+        assert '"B": 75' not in src, "对话优先级 B=75 会显示成红色（紧急档）"
+        assert '"C": 55' not in src, "对话优先级 C=55 会显示成橙色（重要档）"

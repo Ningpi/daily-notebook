@@ -84,6 +84,7 @@ STRINGS = {
                    "Already had those — I updated the times."),
     "task_done_push": ("【{title}】完成", "【{title}】done"),
     "menu_priority": ("调整优先级", "Set priority"),
+    "pri_label": ("优先级", "Priority"),
     "quote_wrap": ("◆ {q}", "◆ {q}"),
     "dup_times_fmt": ("{t}（第{n}次）", "{t} (#{n})"),
     "dup_ask": ("已有相似任务「{title}」。\n"
