@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.19"
+VERSION = "1.9.9.20"
 
 
 # ----------------------------------------------------------------- 配色
@@ -289,6 +289,17 @@ class Store(object):
             "text_darken": getattr(self, "text_darken", None),
         }
         self._atomic(self.path, obj)
+        # v1.9.9.20：每天首次保存做一次快照，保留最近 7 天
+        # （同一天只会成功一次，后续调用直接返回，开销可忽略）
+        try:
+            if not getattr(Store, "_snap_done", None) == self.today:
+                import exporter as _exp
+                if _exp.auto_snapshot(data_dir(),
+                                      [("tasks.json", self.path),
+                                       ("history.json", self.hist_path)]):
+                    Store._snap_done = self.today
+        except Exception:
+            pass
 
     # ---------------- 历史归档
     def load_history(self):
@@ -1021,6 +1032,10 @@ class NoteApp(object):
         self._alpha_panel = None
         self._unbind_alpha_away = lambda: None
         self._due_cards = []       # 右下角截止提醒卡片
+        self._tray = None          # 系统托盘（v1.9.9.20，Windows 才可用）
+        self._tray_hidden = False
+        self._long_titles = {}     # 本屏被截断的标题 → 全文（悬停提示）
+        self._title_tip = None
         self._edit_entry = None    # 当前正在编辑标题的 Entry
         self._bubble = None        # 右下角「未完成任务」气泡
         self._undo_last = None     # 最近一次可撤回的操作（v1.9.5）
@@ -1169,6 +1184,41 @@ class NoteApp(object):
         except Exception:
             pass
 
+    def _ime_composing(self):
+        """中文输入法是否正在组字（候选词未上屏）。
+
+        v1.9.9.20：拼音里按回车是「上屏」，原来被当成发送，消息发出去
+        半截、拼音残留，用户只好再按一次回车——这就是「要按两次」的来源。
+        Windows 下用 ImmGetContext + ImmGetCompositionStringW 读组字串，
+        非空即组字中；读不到就当作没在组字（退回原行为，不会更糟）。
+        """
+        if os.name != "nt":
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+            hwnd = self.entry.winfo_id()
+            imm32 = ctypes.windll.imm32
+            himc = imm32.ImmGetContext(wintypes.HWND(hwnd))
+            if not himc:
+                return False
+            try:
+                # GCS_COMPSTR = 0x0008，返回组字串字节数（宽字符）
+                n = imm32.ImmGetCompositionStringW(himc, 0x0008, None, 0)
+                # 返回负数表示当前没有组字
+                return n is not None and n > 0
+            finally:
+                imm32.ImmReleaseContext(wintypes.HWND(hwnd), himc)
+        except Exception:
+            return False
+
+    def _on_entry_return(self, e=None):
+        """回车：组字中交给输入法，组字结束才发送"""
+        if self._ime_composing():
+            return None          # 不 return "break"，让输入法自己上屏
+        self.on_send()
+        return "break"
+
     def _key_fallback(self, e):
         """焦点不在输入框时，把打字/编辑键转交过去（解决无边框窗口吃键盘焦点的问题）。
         路由后立即把焦点真正交给输入框——这样光标会出现，后续按键走原生路径，
@@ -1230,8 +1280,10 @@ class NoteApp(object):
         w = int(sw / 6)
         h = int(sh / 3)
         # v1.9.9.17：默认最小尺寸 250x300 → 320x420（任务列表+聊天区太挤）
-        w = max(320, min(w, 460))
-        h = max(420, min(h, 480))
+        # v1.9.9.20：再提到 360x460——320 宽下长标题常挤成两行、
+        # 列表只能显示三四条，用户反馈「偏窄、留白多」
+        w = max(360, min(w, 480))
+        h = max(460, min(h, 560))
         x = sw - w - int(sw * 0.012)
         y = int(sh * 0.055)
         # 恢复上次关闭前的位置和大小
@@ -1258,7 +1310,7 @@ class NoteApp(object):
         y = max(8, min(y, sh - h - 40))
         r.geometry("%dx%d+%d+%d" % (w, h, x, y))
         r.minsize(250, 150)
-        r.protocol("WM_DELETE_WINDOW", self.quit)
+        r.protocol("WM_DELETE_WINDOW", self.close_or_hide)
         # v1.9.9.3：源码运行时窗口/任务栏分组也用新图标
         # （打包版的 exe 图标由 PyInstaller 编进 exe，见 每日记事本.spec）
         try:
@@ -1428,8 +1480,10 @@ class NoteApp(object):
                               highlightthickness=1, highlightbackground=C.INPUT_LINE,
                               highlightcolor=C.ACCENT)
         self.entry.pack(side="left", fill="x", expand=True, ipady=4)
-        self.entry.bind("<Return>", lambda e: self.on_send())
-        self.entry.bind("<KP_Enter>", lambda e: self.on_send())
+        # v1.9.9.20：中文输入法组字中按回车是「上屏候选词」，不能当发送。
+        # Tk 在组字时仍会把 <Return> 派发过来，这里先探一下组字状态再决定。
+        self.entry.bind("<Return>", self._on_entry_return)
+        self.entry.bind("<KP_Enter>", self._on_entry_return)
         self.entry.bind("<FocusIn>", self.clear_placeholder)
         self.entry.bind("<FocusOut>", self.restore_placeholder)
         # 无边框窗口下点击不一定把键盘焦点交给输入框，这里显式要一次
@@ -1442,6 +1496,10 @@ class NoteApp(object):
                                  font=self.f_small, padx=7, pady=3, cursor="hand2")
         self.send_btn.pack(side="left", padx=(4, 0))
         self.send_btn.bind("<Button-1>", lambda e: self.on_send())
+        # v1.9.9.20：显式告诉用户回车能发，也说明输入法上屏时回车不算发送
+        self.hint_lbl = tk.Label(self.input_row, text=tr("enter_send_hint"),
+                                 bg=C.BG, fg=C.SUB, font=self.f_tiny)
+        self.hint_lbl.pack(side="left", padx=(4, 0))
 
         # 可拖动分隔条：上下拖动调整聊天区高度
         self.splitter = tk.Frame(r, bg=C.SPLIT, height=4,
@@ -1532,7 +1590,11 @@ class NoteApp(object):
                        font=(self.f_ui, 9, "bold"), fill=C.TEXT)
         # 右侧按钮（从右往左）
         bx = w - 14
-        self._btn_close(bx, h // 2, self.quit, "#B4463C")
+        # v1.9.9.20：✕ 改成「收到托盘」（托盘可用时），右键才真正退出，
+        # 这样关掉主窗口也不会丢提醒。托盘不可用（非 Windows）则保持退出。
+        self._btn_close(bx, h // 2,
+                        self.close_or_hide if self._tray_ok() else self.quit,
+                        "#B4463C")
         bx -= 22
         self._btn_line(bx, h // 2, self.minimize, C.TEXT)
         bx -= 22
@@ -2349,6 +2411,12 @@ class NoteApp(object):
             pass
         self._save_note_pos()
         self._close_clock()
+        # v1.9.9.20：先撤托盘图标，否则退出后系统栏里会留一个死图标
+        try:
+            if getattr(self, "_tray", None):
+                self._tray.stop()
+        except Exception:
+            pass
         b = getattr(self, "_bubble", None)
         if b is not None:
             b.close()
@@ -3633,7 +3701,14 @@ class NoteApp(object):
 
     def _onboarding(self, text):
         """首轮引导：自我介绍 → 问昵称 → 使用指南。返回回复文本；已完成则返回 None
-        v1.9.9.5：顺序改为「先说明我是谁，再问怎么称呼，答完给一份简短使用指南」"""
+        v1.9.9.5：顺序改为「先说明我是谁，再问怎么称呼，答完给一份简短使用指南」
+
+        v1.9.9.20：新用户第一件事通常是记一条待办，不该被昵称卡住。
+        - 昵称只问一次：没听懂就直接跳过，进入正常记任务（原来会无限
+          重复「没太听懂，你希望我怎么称呼您呢」，用户输入「明天下午3点
+          跟张总开会」永远出不去）；
+        - 引导阶段输入像任务就直接建任务，昵称之后再补；
+        - 明确的「跳过 / 先不设 / skip」直接放行。"""
         s = (text or "").strip()
         stage = int(getattr(self.store, "setup_stage", 0) or 0)
         # 还没问过 → 第一句先自我介绍，再问称呼
@@ -3643,24 +3718,43 @@ class NoteApp(object):
             bot = getattr(self.store, "bot_name", "") or (
                 "小宁" if not i18n.is_en() else "Note")
             return tr("intro_first", bot=bot) + "\n" + tr("ask_user_name")
-        if stage == 1:
-            # 用户可能一上来就问「你是谁」，先答，别硬拽着问名字
-            if core.SELF_RE.search(s) and len(s) <= 30 and not core.extract_name(s):
-                bot = getattr(self.store, "bot_name", "") or (
-                    "小宁" if not i18n.is_en() else "Note")
-                return tr("intro_first", bot=bot) + "\n" + tr("ask_user_name")
-            nm = core.extract_name(s)
-            if not nm:
-                return tr("ask_user_name_again")
-            self.store.user_name = nm
-            # v1.8.1：不再问「助手叫什么」——问完称呼直接开聊
-            self.store.setup_stage = 3
-            if not self.store.bot_name:
-                self.store.bot_name = "小宁" if not i18n.is_en() else "Note"
-            self.store.save()
-            # v1.9.9.5：称呼记住后，附一份简短使用指南（含提醒说明）
+        if stage != 1:
+            return None
+
+        # 用户可能一上来就问「你是谁」，先答，别硬拽着问名字
+        if core.SELF_RE.search(s) and len(s) <= 30 and not core.extract_name(s):
+            bot = getattr(self.store, "bot_name", "") or (
+                "小宁" if not i18n.is_en() else "Note")
+            return tr("intro_first", bot=bot) + "\n" + tr("ask_user_name")
+
+        # v1.9.9.20：明确表示跳过 → 直接进入使用，昵称留空
+        if re.fullmatch(r"\s*(跳过|先不设|不设|不用了?|算了|不想|以后再说|"
+                        r"skip|later|no)\s*[。.！!～~]*\s*", s, re.I):
+            self._finish_onboarding(None)
+            return tr("onboard_skipped") + "\n" + tr("usage_guide")
+
+        nm = core.extract_name(s)
+        if nm:
+            self._finish_onboarding(nm)
             return tr("name_ok", name=nm) + "\n" + tr("usage_guide")
-        return None
+
+        # 没提取到昵称：如果这句话本身像一条任务，就按任务处理并跳过昵称
+        if core.parse_tasks(s, fallback=False):
+            self._finish_onboarding(None)
+            return tr("onboard_as_task") + "\n\n" + self.respond(s)
+
+        # 既不像名字也不像任务 → 只提醒一次，然后放行（不再死循环追问）
+        self._finish_onboarding(None)
+        return tr("onboard_no_name_ok") + "\n" + tr("usage_guide")
+
+    def _finish_onboarding(self, name):
+        """结束引导：记下昵称（可为空），stage 置 3"""
+        if name:
+            self.store.user_name = name
+        self.store.setup_stage = 3
+        if not self.store.bot_name:
+            self.store.bot_name = "小宁" if not i18n.is_en() else "Note"
+        self.store.save()
 
     def _intro_self(self):
         """回答「你是谁 / 介绍你自己」"""
@@ -4338,6 +4432,7 @@ class NoteApp(object):
         cv = self.list_cv
         self.store.sync_history()
         cv.delete("all")
+        self._long_titles = {}      # v1.9.9.20：本屏被截断的标题（悬停提示用）
         w = max(cv.winfo_width(), 60)
         rh = self.row_height()
         ordered = self.sorted_tasks()
@@ -4359,6 +4454,10 @@ class NoteApp(object):
             y += rh
             total += rh
         cv.config(scrollregion=(0, 0, w, max(total + 4, cv.winfo_height())))
+        # v1.9.9.20：空列表时给一个显眼的「记一条」按钮，点击直接聚焦输入框
+        # （只有聊天输入框时，鼠标用户第一次容易找不到从哪加任务）
+        if not ordered:
+            self._draw_empty_hint(cv, w)
         if scroll_top:
             cv.yview_moveto(0)
         left = sum(1 for t in self.store.tasks if not t.get("done"))
@@ -4370,6 +4469,39 @@ class NoteApp(object):
         if cal is not None and cal.winfo_exists() and getattr(self, "_cal_cv", None):
             self._draw_calendar()
         self._update_bubble()
+
+    def _draw_empty_hint(self, cv, w):
+        """空列表提示 + 「记一条」按钮（v1.9.9.20）"""
+        try:
+            ch = cv.winfo_height()
+            if ch < 60:                 # 首帧还没布局好，按窗口高度估
+                ch = max(120, self.root.winfo_height() - 160)
+            cy = max(60, ch // 2 - 30)
+            cv.create_text(w / 2, cy, text=tr("empty_hint"),
+                           fill=C.SUB, font=self.f_small, anchor="center")
+            bw, bh = 96, 26
+            x0, y0 = w / 2 - bw / 2, cy + 22
+            cv.create_rectangle(x0, y0, x0 + bw, y0 + bh,
+                                fill=C.ACCENT, outline="", tags=("empty_btn",))
+            cv.create_text(x0 + bw / 2, y0 + bh / 2, text=tr("empty_add"),
+                           fill="white", font=self.f_small,
+                           tags=("empty_btn",))
+            cv.tag_bind("empty_btn", "<Button-1>",
+                        lambda e: self._focus_entry())
+            cv.tag_bind("empty_btn", "<Enter>",
+                        lambda e: cv.config(cursor="hand2"))
+            cv.tag_bind("empty_btn", "<Leave>",
+                        lambda e: cv.config(cursor=""))
+        except Exception:
+            pass
+
+    def _focus_entry(self):
+        """把焦点给输入框（空状态按钮 / 托盘提示共用）"""
+        try:
+            self.entry.focus_force()
+            self.entry.icursor("end")
+        except Exception:
+            pass
 
     def _update_bubble(self):
         """未完成任务数变化后同步右下角气泡"""
@@ -4443,6 +4575,9 @@ class NoteApp(object):
         cv.create_text(tx, y + rh / 2, text=title, anchor="w", font=fnt,
                        fill=C.DONE if done else C.TEXT,
                        tags=("t_" + tid,))
+        # v1.9.9.20：标题被截断时，悬停显示完整内容
+        if not title_fits:
+            self._long_titles[tid] = task["title"].replace("\n", " ")
         if done:
             tw = self.text_width(title, fnt)
             cv.create_line(tx, y + rh / 2 + 1, tx + tw, y + rh // 2 + 1,
@@ -4481,8 +4616,91 @@ class NoteApp(object):
         # 标题点击：单击编辑，双击完成
         cv.tag_bind("t_" + tid, "<Button-1>", lambda e, k=tid, yy=y: self.begin_edit(k, yy))
         cv.tag_bind("t_" + tid, "<Button-3>", lambda e, k=tid: self.row_menu(e, k))
+        # v1.9.9.20：被截断的标题，悬停看全文
+        if not title_fits:
+            cv.tag_bind("t_" + tid, "<Enter>",
+                        lambda e, k=tid: self._show_title_tip(e, k))
+            cv.tag_bind("t_" + tid, "<Leave>", lambda e: self._hide_title_tip())
         # v1.9.7：整行任意位置都能右键弹菜单（以前必须对准标题文字）
         cv.tag_bind("row_" + tid, "<Button-3>", lambda e, k=tid: self.row_menu(e, k))
+
+    def _show_title_tip(self, e, tid):
+        """悬停显示被截断的完整标题（v1.9.9.20）"""
+        txt = (getattr(self, "_long_titles", None) or {}).get(tid)
+        if not txt:
+            return
+        self._hide_title_tip()
+        try:
+            tip = tk.Toplevel(self.root)
+            tip.overrideredirect(True)
+            tip.attributes("-topmost", True)
+            tk.Label(tip, text=txt, bg=C.HEAD, fg=C.TEXT, font=self.f_small,
+                     wraplength=300, justify="left", padx=6, pady=3,
+                     relief="flat").pack()
+            tip.geometry("+%d+%d" % (e.x_root + 12, e.y_root + 16))
+            self._title_tip = tip
+        except Exception:
+            self._title_tip = None
+
+    def _hide_title_tip(self):
+        tip = getattr(self, "_title_tip", None)
+        if tip is not None:
+            try:
+                tip.destroy()
+            except Exception:
+                pass
+            self._title_tip = None
+
+    def _tray_ok(self):
+        return bool(getattr(self, "_tray", None) and self._tray.available)
+
+    def close_or_hide(self):
+        """✕：托盘可用时藏进托盘（提醒继续跑），否则直接退出"""
+        if self._tray_ok():
+            self.hide_to_tray()
+        else:
+            self.quit()
+
+    def hide_to_tray(self):
+        """藏到托盘：窗口消失，进程和定时器都留着，提醒照常弹"""
+        try:
+            self.root.withdraw()
+        except Exception:
+            pass
+        self._tray_hidden = True
+        self.push("bot", tr("to_tray"))
+        try:
+            self._tray.notify(self.app_name(), tr("to_tray_notify"))
+        except Exception:
+            pass
+
+    def restore_from_tray(self):
+        """托盘图标单击 → 还原窗口"""
+        self._tray_hidden = False
+        try:
+            self.root.deiconify()
+            self.root.overrideredirect(True)
+            self.root.attributes("-topmost", True)
+            self.root.after(120, lambda: self.root.attributes(
+                "-topmost", getattr(self.store, "topmost", True)))
+            self._activate_window()
+        except Exception:
+            pass
+
+    def tray_menu(self):
+        """托盘右键菜单：记一条 / 显示主窗 / 退出"""
+        try:
+            m = tk.Menu(self.root, tearoff=0)
+            m.add_command(label=tr("empty_add"),
+                          command=lambda: (self.restore_from_tray(),
+                                           self._focus_entry()))
+            m.add_command(label=tr("tray_show"), command=self.restore_from_tray)
+            m.add_separator()
+            m.add_command(label=tr("tray_quit"), command=self.quit)
+            m.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
+            m.grab_release()
+        except Exception:
+            pass
 
     def toggle_done(self, tid):
         changed = False
@@ -5547,6 +5765,16 @@ class NoteApp(object):
         except Exception:
             import traceback as _tb
             self.diag("!! 截止提醒卡片失败:\n" + _tb.format_exc())
+        # v1.9.9.20：同时发一条系统托盘气泡——窗口藏进托盘 / 被其他
+        # 全屏窗口盖住时，右下角卡片可能看不到，气泡是第二道保险
+        if self._tray_ok():
+            try:
+                t_txt = task.get("title", "")
+                h_txt = task.get("hhmm") or ""
+                self._tray.notify(tr("due_win_title"),
+                                  ("%s  %s" % (t_txt, h_txt)).strip())
+            except Exception:
+                pass
 
     def open_task_detail(self, tid):
         """点提醒卡片 → 打开该任务的详情页"""
@@ -6072,6 +6300,13 @@ class NoteApp(object):
         close.bind("<Button-1>", lambda e: self.close_history())
         close.bind("<Enter>", lambda e: close.config(fg="#B4463C"))
         close.bind("<Leave>", lambda e: close.config(fg=C.SUB))
+        # v1.9.9.20：导出入口放在历史窗口（数据都在这儿看，顺手就能导）
+        self.export_btn = tk.Label(head, text=tr("export_btn"), bg=C.HEAD, fg=C.SUB,
+                                   font=self.f_tiny, padx=8, cursor="hand2")
+        self.export_btn.pack(side="right")
+        self.export_btn.bind("<Button-1>", self.open_export_menu)
+        self.export_btn.bind("<Enter>", lambda e: self.export_btn.config(fg=C.ACCENT))
+        self.export_btn.bind("<Leave>", lambda e: self.export_btn.config(fg=C.SUB))
 
         # 汇总条（总天数 / 总任务 / 总完成 / 完成率）
         self.hist_sum = tk.Label(win, text="", bg=C.BG, fg=C.SUB,
@@ -6107,6 +6342,70 @@ class NoteApp(object):
         if getattr(self, "_hist_locked", False):
             return
         self.hist_cv.yview_scroll(direction, "units")
+
+    def open_export_menu(self, e=None):
+        """导出菜单：JSON（完整备份）/ Markdown（可读归档）/ 日历 ICS（v1.9.9.20）"""
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(label=tr("export_json"),
+                      command=lambda: self.do_export("json"))
+        m.add_command(label=tr("export_md"),
+                      command=lambda: self.do_export("md"))
+        m.add_command(label=tr("export_ics"),
+                      command=lambda: self.do_export("ics"))
+        m.add_separator()
+        m.add_command(label=tr("export_open_dir"),
+                      command=self.open_data_dir)
+        try:
+            if e is not None:
+                m.tk_popup(e.x_root, e.y_root)
+            else:
+                m.tk_popup(self.root.winfo_pointerx(),
+                           self.root.winfo_pointery())
+        finally:
+            m.grab_release()
+
+    def open_data_dir(self):
+        """在资源管理器里打开数据目录（方便用户自己拿备份）"""
+        try:
+            d = data_dir()
+            if os.name == "nt":
+                os.startfile(d)
+            elif sys.platform == "darwin":
+                os.system('open "%s"' % d)
+            else:
+                os.system('xdg-open "%s" >/dev/null 2>&1 &' % d)
+        except Exception:
+            self.push("bot", tr("export_dir_fail", d=data_dir()))
+
+    def do_export(self, kind):
+        """生成导出文件：默认放到数据目录，成功后告诉用户路径"""
+        try:
+            import exporter as _exp
+            self.store.sync_history()
+            ext = {"json": "json", "md": "md", "ics": "ics"}[kind]
+            stamp = dt.datetime.now().strftime("%Y%m%d-%H%M")
+            name = _exp.safe_name("每日记事本-%s.%s" % (stamp, ext))
+            path = os.path.join(data_dir(), name)
+            if kind == "json":
+                data = _exp.to_json(self.store.tasks, self.store.history,
+                                    {"user_name": self.nickname,
+                                     "theme": self.store.theme,
+                                     "lang": self.store.lang,
+                                     "version": VERSION})
+                mode = "w"
+            elif kind == "md":
+                data = _exp.to_markdown(self.store.tasks, self.store.history)
+                mode = "w"
+            else:
+                data = _exp.to_ics(self.store.tasks, self.store.history)
+                mode = "w"
+            with open(path, mode, encoding="utf-8", newline="") as f:
+                f.write(data)
+            self.push("bot", tr("export_ok", p=path))
+            return path
+        except Exception as exc:
+            self.push("bot", tr("export_fail", e="%s" % exc))
+            return None
 
     def _render_history(self):
         if self._hist_win is None or not self._hist_win.winfo_exists():
@@ -6513,6 +6812,23 @@ def main():
     _diag("单实例注册完成（后台线程监听）")
     root.after(300, _serve)
     root.after(1500, _ensure_desktop_shortcut)
+
+    # v1.9.9.20：启动系统托盘（关窗口后进程常驻，提醒不丢）。
+    # 非 Windows / 初始化失败会自动降级成 no-op，✕ 仍是直接退出。
+    def _start_tray():
+        try:
+            import tray as _tray_mod
+            t = _tray_mod.Tray(app)
+            if t.start():
+                app._tray = t
+                app._tray.update_tip(app.app_name())
+        except Exception as exc:
+            app._tray = None
+            try:
+                app.diag("[tray] 托盘启动失败：%r" % (exc,))
+            except Exception:
+                pass
+    root.after(800, _start_tray)
 
     def tick():
         # 截止时间提醒

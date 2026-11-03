@@ -625,3 +625,97 @@ class TestV19918ClockAndInstance:
         srv.close()
         assert r == "exists", r
         assert cost < 1.0, cost
+
+
+class TestV19920OnboardingAndUX:
+    """v1.9.9.20：引导可跳过 / 输入法回车 / 空状态入口 / 长标题悬停"""
+
+    def _fresh_setup(self, app):
+        """把引导状态清零（fixture 的 store 可能被前序用例推进过）"""
+        app.store.setup_stage = 0
+        app.store.user_name = ""
+        app.store.bot_name = ""
+        app.store.tasks = []
+        app.store.save()
+
+    def test_onboarding_task_skips_nickname(self, app):
+        """引导阶段直接说任务 → 建任务并跳过昵称，不死循环追问"""
+        a = app
+        self._fresh_setup(a)
+        a.respond("你好")
+        assert a.store.setup_stage == 1
+        a.respond("明天下午3点跟张总开会")
+        assert a.store.setup_stage == 3, "昵称阶段没有放行"
+        assert a.store.tasks, "任务没建出来"
+        assert a.store.tasks[0]["hhmm"] == "15:00"
+
+    def test_onboarding_skip_keyword(self, app):
+        """说「跳过」直接进入使用"""
+        a = app
+        self._fresh_setup(a)
+        a.respond("你好")
+        a.respond("跳过")
+        assert a.store.setup_stage == 3
+        assert not a.store.user_name
+
+    def test_onboarding_name_still_works(self, app):
+        """正常说名字仍然记得住"""
+        a = app
+        self._fresh_setup(a)
+        a.respond("你好")
+        a.respond("叫我小李吧")
+        assert a.store.setup_stage == 3
+        assert a.store.user_name == "小李"
+
+    def test_onboarding_no_loop(self, app):
+        """既不是名字也不是任务 → 只问一次就放行"""
+        a = app
+        self._fresh_setup(a)
+        a.respond("你好")
+        a.respond("呃这个嘛")
+        assert a.store.setup_stage == 3, "仍在追问昵称（会死循环）"
+
+    def test_empty_state_button(self, app):
+        """空列表时有「记一条」按钮，点它聚焦输入框"""
+        a = app
+        a.refresh_tasks()
+        a.root.update()
+        assert a.list_cv.find_withtag("empty_btn"), "空状态没有记一条按钮"
+        a._focus_entry()
+        a.root.update()
+        # 有任务后按钮消失
+        a.respond("买牛奶")
+        a.refresh_tasks()
+        a.root.update()
+        assert not a.list_cv.find_withtag("empty_btn")
+
+    def test_window_default_width(self, app):
+        """默认宽度不低于 360"""
+        a = app
+        assert a.root.winfo_width() >= 360 or \
+            int(a.store.note_geom.split(",")[0] if a.store.note_geom else 0) >= 360
+
+    def test_return_sends(self, app):
+        """回车发送：没有组字时立刻提交"""
+        a = app
+        self._fresh_setup(a)
+        a.store.setup_stage = 3          # 跳过引导，直接测发送
+        # 模拟用户先点输入框（FocusIn 会清掉占位提示）
+        a.clear_placeholder()
+        a.entry.delete(0, "end")
+        a.entry.insert(0, "买牛奶")
+        r = a._on_entry_return()
+        assert r == "break"
+        assert a.store.tasks, "回车没有发送"
+
+    def test_ime_composing_detected_api(self, app):
+        """_ime_composing 在任何平台都返回 bool，不抛异常"""
+        assert isinstance(app._ime_composing(), bool)
+
+    def test_long_title_registered_for_tooltip(self, app):
+        """超长标题会登记到悬停提示表"""
+        a = app
+        a.respond("这是一条特别特别特别特别长的任务标题用来测试悬停提示会不会登记" * 2)
+        a.refresh_tasks()
+        a.root.update()
+        assert a._long_titles, "长标题没有登记，悬停看不到全文"
