@@ -152,7 +152,6 @@ STRINGS = {
     "clock_pause": ("暂停", "Pause"),
     "clock_resume": ("继续", "Resume"),
     "clock_reset": ("清零", "Reset"),
-    "clock_reset": ("归零", "Reset"),
     "clock_done": ("时间到！", "Time's up!"),
     "clock_top": ("窗口置顶", "Always on top"),
     "clock_min": ("分钟", "min"),

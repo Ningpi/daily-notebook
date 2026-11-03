@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.17"
+VERSION = "1.9.9.18"
 
 
 # ----------------------------------------------------------------- 配色
@@ -5824,7 +5824,14 @@ class NoteApp(object):
         if sw is not None and sw.winfo_exists():
             el = self._sw_base + (time.time() - self._sw_t0 if self._sw_running else 0)
             m, sec = divmod(int(el), 60)
-            txt = "%s  %02d:%02d" % (tr("clock_sw"), m, sec)
+            # v1.9.9.18：超过 1 小时用「xx小时xx分钟」，60分/90分 这种读着别扭；
+            # 不到 1 小时仍用 mm:ss，方便看秒级
+            if m >= 60:
+                hh, mm = divmod(m, 60)
+                txt = "%s  %d%s%d%s" % (tr("clock_sw"), hh, tr("clock_hr"),
+                                        mm, tr("clock_min"))
+            else:
+                txt = "%s  %02d:%02d" % (tr("clock_sw"), m, sec)
             if str(sw.cget("text")) != txt:
                 sw.config(text=txt)
         # 倒计时（到期弹窗由全局心跳 _cd_bg_tick 统一负责，这里只显示）
@@ -6229,7 +6236,7 @@ class NoteApp(object):
 # 现在用本机端口做锁：第二个实例启动时把已有窗口唤到前台后自己退出。
 _SINGLE_PORT = 27190
 
-def _single_instance_register(on_show, root0):
+def _single_instance_register(on_show, root0, srv0=None):
     """尝试成为唯一实例。成功返回 (socket, serve)；已有实例在跑则
     通知它显示窗口并返回 (None, None)。
 
@@ -6240,6 +6247,9 @@ def _single_instance_register(on_show, root0):
     连接也失败（端口被僵尸进程占据）→ 静默退出。现在改为：发 show
     失败后等 0.5 秒尝试**接管**端口（SO_REUSEADDR=1），接管成功就
     照常启动，只有真的接管不了才退出。
+
+    v1.9.9.18：srv0 —— main() 早期探针已经 bind 好的 socket，
+    直接复用，省掉一次 bind/listen。
     """
     def _bind():
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -6248,27 +6258,28 @@ def _single_instance_register(on_show, root0):
         srv.listen(2)
         return srv
 
-    srv = None
-    try:
-        srv = _bind()
-    except OSError:
-        # 端口被占 → 通常已有实例：通知它亮出窗口
-        notified = False
-        try:
-            c = socket.create_connection(("127.0.0.1", _SINGLE_PORT), timeout=1)
-            c.sendall(b"show")
-            c.close()
-            notified = True
-        except Exception:
-            notified = False
-        if notified:
-            return None, None
-        # show 也没送出去 → 大概率是僵尸进程占着端口。等 0.5 秒尝试接管
-        time.sleep(0.5)
+    srv = srv0
+    if srv is None:
         try:
             srv = _bind()
         except OSError:
-            return None, None
+            # 端口被占 → 通常已有实例：通知它亮出窗口
+            notified = False
+            try:
+                c = socket.create_connection(("127.0.0.1", _SINGLE_PORT), timeout=1)
+                c.sendall(b"show")
+                c.close()
+                notified = True
+            except Exception:
+                notified = False
+            if notified:
+                return None, None
+            # show 也没送出去 → 大概率是僵尸进程占着端口。等 0.5 秒尝试接管
+            time.sleep(0.5)
+            try:
+                srv = _bind()
+            except OSError:
+                return None, None
 
     import queue as _q, threading as _th
     show_q = _q.Queue()
@@ -6379,6 +6390,42 @@ def _ensure_desktop_shortcut():
         _mk()
 
 
+def _probe_existing_instance():
+    """启动最早期判断「是不是已经有实例在跑」。
+
+    v1.9.9.18：这是独立于 _single_instance_register 的“快速探针”。
+    原流程是先 tk.Tk() + NoteApp(root)（读数据、建全部控件、约 6~10 秒），
+    才做单实例检测 —— 于是重复启动会白build一整套界面再退出，
+    用户感觉像卡住。现在先探一次：
+      - 端口能用 → 说明没有别的实例，返回 ("free", None)，继续正常启动
+      - 端口被占且能连上 → 已有实例，发 show 让它亮出窗口，返回 ("exists", None)
+      - 端口被占但连不上 → 疑似僵尸占口，返回 ("zombie", None)，交给后面接管
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    ok = False
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", _SINGLE_PORT))
+        s.listen(2)
+        ok = True
+        return "free", s           # 顺手把已经 bind 好的 socket 交回去复用
+    except OSError:
+        ok = False
+    finally:
+        if not ok:
+            try:
+                s.close()
+            except Exception:
+                pass
+    try:
+        c = socket.create_connection(("127.0.0.1", _SINGLE_PORT), timeout=1)
+        c.sendall(b"show")
+        c.close()
+        return "exists", None
+    except Exception:
+        return "zombie", None
+
+
 def main():
     def _diag(msg):
         """启动阶段黑匣子：走 NoteApp 的后台写日志线程（绝不在 UI 线程碰磁盘），
@@ -6387,6 +6434,11 @@ def main():
             app.diag("[main] " + msg)
         except Exception:
             pass
+
+    # v1.9.9.18：先探单实例，命中就直接退出（毫秒级），不再白建整个界面
+    _probe, _early_srv = _probe_existing_instance()
+    if _probe == "exists":
+        return
 
     root = tk.Tk()
     app = NoteApp(root)
@@ -6403,7 +6455,7 @@ def main():
             app._activate_window()
         except Exception:
             pass
-    _srv, _serve = _single_instance_register(_show_existing, root)
+    _srv, _serve = _single_instance_register(_show_existing, root, _early_srv)
     if _srv is None:
         root.destroy()
         return

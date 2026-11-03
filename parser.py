@@ -137,10 +137,13 @@ TIME_STRIP_RE = re.compile(
     r"\d{1,2}\s*[:：]\s*\d{1,2}|"
     r"(?:上午|下午|中午|早上|早晨|晚上|傍晚|夜里|凌晨|下班前|上班前|午饭前|睡觉前)\s*"
     r"(?:\d{1,2}|[%s]{1,3})?\s*(?:点|時|时)?\s*(?:半|\d{1,2}分?)?|"
-    r"(?:\d{1,2}|[%s]{1,3})\s*(?:点|時|时)\s*(?:半|\d{1,2}分?)?\s*(?:之前|以前|前)?|"
+    r"(?:\d{1,2}|[%s]{1,3})\s*(?:点|時|时)\s*(?:钟|半|一刻|两刻|二刻|三刻|\d{1,2}分?)?\s*(?:之前|以前|前)?|"
     r"(?:\d{1,2}|[%s]{1,3}|半)\s*(?:天|日|个?\s*(?:周|星期|礼拜)|个?\s*月)\s*(?:之)?后|"
     # 「两小时后 / 半小时后 / 45分钟后」这类相对时刻
     r"(?:\d{1,3}|[%s]{1,3}|半)\s*个?\s*(?:半\s*)?(?:小时|分钟)\s*(?:之)?后|"
+    # v1.9.9.18：纯时长也要整体剥（跑10分钟 → 跑，而不是「跑分钟」）
+    r"(?:\d{1,3}|[%s]{1,3}|半)\s*个?\s*(?:半\s*)?(?:小时|分钟|秒钟?)|"
+    r"一个半小时|半个小时|半小时|小半天|半天|"
     r"\d{1,2}\s*(?:之前|以前|前)|"
     r"上午|下午|中午|早上|早晨|晚上|傍晚|夜里|凌晨|下班前|上班前|午饭前|睡觉前|"
     r"今天|今日|明天|明日|后天|今儿|明儿|之前|以前|左右|点|時|时|(?<!\d)分(?!钟)|"
@@ -151,7 +154,8 @@ TIME_STRIP_RE = re.compile(
     # 「N号」排除量词（3号电池 / 5号楼 / 2号会议室），用负向环视挡住
     r"(?<!\d)(?:\d{1,2}|[%s]{1,3})\s*[日号]"
     r"(?![记码楼栋房院线机位桌床柜仓门车窗箱包厅室岗位店单元])"
-    % (CN_DIGIT, CN_DIGIT, CN_DIGIT, CN_DIGIT, CN_DIGIT, CN_DIGIT, CN_DIGIT))
+    % (CN_DIGIT, CN_DIGIT, CN_DIGIT, CN_DIGIT, CN_DIGIT, CN_DIGIT, CN_DIGIT,
+       CN_DIGIT))
 
 
 # ---------------------------------------------------------------- 时间识别
@@ -387,9 +391,12 @@ def find_times(text):
         if 0 <= h <= 23:
             out.append((f"{h:02d}:00", (h, 0), _rng.start(), _rng.group(0)))
     # 2) 中文钟点（含「十一点」「二十三点」「壹拾贰点」；v1.9.4 加「一刻」=15分）
+    # v1.9.9.18：刻钟要排在「数字分钟」之前匹配，否则「九点三刻」里的
+    # 「三」被当成 3 分钟（→ 09:03），正确应为 09:45
     for m in re.finditer(r"(上午|下午|中午|早上|早晨|晚上|今晚|明晚|傍晚|夜里|凌晨)?\s*"
-                         r"(\d{1,2}|[%s]{1,3})\s*(?:点|時|时)" % CN_DIGIT +
-                         r"(?:\s*半|\s*一刻|\s*(?:(\d{1,2})|([%s]{1,3}))\s*分?)?" % CN_DIGIT +
+                         r"(\d{1,2}|[%s]{1,3})\s*(?:点|時|时)\s*钟?" % CN_DIGIT +
+                         r"(?:\s*半|\s*(一刻|两刻|二刻|三刻)|"
+                         r"\s*(?:(\d{1,2})|([%s]{1,3}))\s*分?)?" % CN_DIGIT +
                          r"\s*(?:之前|以前|前)?", text):
         h = _num(m.group(2))
         per = m.group(1) or ""
@@ -403,10 +410,10 @@ def find_times(text):
             continue
         if "半" in m.group(0):
             mi = 30
-        elif "一刻" in m.group(0):
-            mi = 15
+        elif m.group(3):                    # 一刻/两刻/二刻/三刻
+            mi = {"一刻": 15, "两刻": 30, "二刻": 30, "三刻": 45}[m.group(3)]
         else:
-            mi = int(m.group(3)) if m.group(3) else (_num(m.group(4)) if m.group(4) else 0)
+            mi = int(m.group(4)) if m.group(4) else (_num(m.group(5)) if m.group(5) else 0)
         out.append((f"{h:02d}:{mi:02d}", (h, mi), m.start(), m.group(0)))
     # 3) 只有时段词
     for w, idx in _hits_of(text, PER_WORDS):
@@ -457,6 +464,34 @@ BARE_NUM_RE = re.compile(r"(?<!\d)\d+(?!\d)")
 # 占位符里绝对不能出现数字，否则 BARE_NUM_RE 仍会把编号当裸数字删掉
 _QTY_SLOTS = ["\x02aq\x03", "\x02bq\x03", "\x02cq\x03", "\x02dq\x03", "\x02eq\x03",
               "\x02fq\x03", "\x02gq\x03", "\x02hq\x03", "\x02iq\x03", "\x02jq\x03"]
+
+
+# v1.9.9.18：算式保护槽。BARE_NUM_RE 会剥掉孤立数字，「1+1=2」就只剩「+=」。
+# 槽位同样不能含数字。
+_MATH_SLOTS = ["\x02am\x03", "\x02bm\x03", "\x02cm\x03", "\x02dm\x03", "\x02em\x03",
+               "\x02fm\x03", "\x02gm\x03", "\x02hm\x03"]
+# 算式：至少一个运算符，两侧带数字（1+1=2 / 3*4 / 15/3 / 2^10）
+_MATH_RE = re.compile(r"\d+(?:\.\d+)?(?:\s*[+\-*/×÷^%]\s*\d+(?:\.\d+)?)+"
+                      r"(?:\s*=\s*\d+(?:\.\d+)?)?")
+
+
+def _protect_math(t):
+    """把算式整体换成占位符，避免孤立数字被剥掉后只剩运算符"""
+    bag = []
+
+    def _wrap(m):
+        v = m.group(0)
+        slot = _MATH_SLOTS[len(bag) % len(_MATH_SLOTS)]
+        bag.append((slot, v))
+        return slot
+
+    return _MATH_RE.sub(_wrap, t), bag
+
+
+def _restore_math(t, bag):
+    for slot, v in bag or []:
+        t = t.replace(slot, v)
+    return t
 
 
 def _protect_qty(t):
@@ -573,6 +608,28 @@ MID_NOISE = ["麻烦你", "麻烦", "请帮我", "帮我一下", "谢谢你", "�
 
 def clean_title(text, hits=()):
     t = text or ""
+    # v1.9.9.18：算式（1+1=2 / 3*4 / 15/3）先整体保护起来。否则
+    # BARE_NUM_RE 会把孤立的数字剥掉，只剩「+=」这种残缺标题。
+    t, _math_bag = _protect_math(t)
+    # v1.9.9.18：hits 只覆盖「九点」不含「钟」，先整体吃掉复合时间词，
+    # v1.9.9.18：时长 + 截止词整体剥掉，否则「一个小时内交」剩「内交」、
+    # 「15分钟后交报告」剩「后交报告」。放在最前面，避免 hits 先切了时长
+    # 只留下悬空的「内/后」。
+    _DUR = r"(?:\d{1,3}|[%s]{1,3}|半)\s*个?\s*(?:半\s*)?(?:小时|分钟|秒|钟头)" % CN_DIGIT
+    t = re.sub(_DUR + r"\s*(?:之内|以内|内|之后|以后|后|之前|以前|前)?", " ", t)
+    t = re.sub(r"(?:\d{1,3}|[%s]{1,3})\s*刻\s*钟\s*"
+               r"(?:之内|以内|内|之后|以后|后|之前|以前|前)?" % CN_DIGIT, " ", t)
+    # 否则残留「钟」（九点钟开会 → 钟开会）。同理「N点M刻」的「刻」。
+    t = re.sub(r"(?:\d{1,2}|[%s]{1,3})\s*(?:点|時|时)\s*钟"
+               r"(?:\s*半|\s*一刻|\s*两刻|\s*二刻|\s*三刻|\s*\d{1,2}\s*分?)?" % CN_DIGIT,
+               " ", t)
+    t = re.sub(r"(?:\d{1,2}|[%s]{1,3})\s*(?:点|時|时)\s*"
+               r"(?:一刻|两刻|二刻|三刻)" % CN_DIGIT, " ", t)
+    # 「每 + 日期/时间词」整体移除（每周三下午2点开会 → 开会）
+    t = re.sub(r"每\s*(?:周|星期|礼拜)\s*[一二三四五六日天1-7]\s*"
+               r"(?:上午|下午|中午|早上|早晨|晚上|傍晚|夜里|凌晨)?\s*"
+               r"(?:\d{1,2}|[%s]{1,3})\s*(?:点|時|时)\s*"
+               r"(?:钟|半|\d{1,2}\s*分?)?" % CN_DIGIT, " ", t)
     # v1.9.9.17：先切最长的时间词（「每周一」要在「周一」之前切，
     # 否则短的先切掉、长的就找不到了，标题残留「每」）
     for h in sorted([h for h in hits if h], key=len, reverse=True):
@@ -649,10 +706,18 @@ def clean_title(text, hits=()):
         t2 = _remove_words(text, MODIFIERS + DAY_WORDS + PER_WORDS)
         t2 = TIME_STRIP_RE.sub("", t2)
         t2 = BARE_NUM_RE.sub("", t2)
+        # v1.9.9.18：残留的「之后/以内/之内/后/前」粘连词也要收掉，
+        # 否则「一个小时内交」兜底重建出「内交」把正确的「交」盖掉
+        _DUR2 = (r"(?:\d{1,3}|[%s]{1,3}|半)\s*个?\s*(?:半\s*)?"
+                 r"(?:小时|分钟|秒|钟头|刻\s*钟)" % CN_DIGIT)
+        t2 = re.sub(_DUR2 + r"\s*(?:之内|以内|内|之后|以后|后|之前|以前|前)?", "", t2)
+        t2 = re.sub(r"^(?:之内|以内|内|之后|以后|后|之前|以前|前)\s*", "", t2)
         t2 = re.sub(r"[\s，,。.：:;；!！?？·…\-—_~～\"'“”‘’]+", "", t2)
-        if len(t2) >= 2:
+        # 只有重建结果确实比现有更完整（且不含悬空截止词）时才采用
+        if len(t2) >= 2 and not re.match(r"^(?:之?[内外后前])", t2):
             t = t2
     t = _restore_shi(t, _t_bag)
+    t = _restore_math(t, _math_bag)
     return t
 
 
@@ -664,6 +729,10 @@ def find_duration(text):
         return None, None
     # 15分钟 / 半小时 / 两个小时 / 一个半小时 / 45 min / 1h
     pats = [
+        # v1.9.9.18：先认「两刻钟 / 一刻钟」（=15 的整数倍），否则「两刻钟」
+        # 会被下面的「X分钟」近似不上而漏掉
+        r"(?:\d{1,3}|[%s]{1,3})\s*刻\s*钟" % CN_DIGIT,
+        r"(?:\d{1,3}|[%s]{1,3})\s*个\s*半\s*小时" % CN_DIGIT,
         r"(\d{1,3}|[%s]{1,3})\s*个?\s*半?\s*小时" % CN_DIGIT,
         r"(\d{1,3}|[%s]{1,3})\s*分钟" % CN_DIGIT,
         r"(?<![点時时\d])(\d{1,3}|[%s]{1,3})\s*分(?!钟)" % CN_DIGIT,
@@ -793,14 +862,23 @@ def split_segments(text):
         part = (part or "").strip()
         if not part:
             continue
+        # v1.9.9.18：时间区间先整体保护，不让它成为分割点。
+        # 覆盖「三点到四点」「9点到11点」「9:00-11:00」「9:00至11:00」
+        # 以及「上午9点到11点半」这类带时段词/分钟的组合。
+        _RANGE_RE = (r"(?:上午|下午|中午|早上|早晨|晚上|今晚|明晚|傍晚|夜里|凌晨)?\s*"
+                     r"(?:\d{1,2}\s*[:：]\s*\d{1,2}|(?:\d{1,2}|[%s]{1,3})\s*(?:点|時|时)"
+                     r"(?:\s*(?:钟|半|一刻|两刻|二刻|三刻|\d{1,2}\s*分?))?)\s*"
+                     r"(?:到|至|-|~|～|—)\s*"
+                     r"(?:\d{1,2}\s*[:：]\s*\d{1,2}|(?:\d{1,2}|[%s]{1,3})\s*(?:点|時|时)"
+                     r"(?:\s*(?:钟|半|一刻|两刻|二刻|三刻|\d{1,2}\s*分?))?)" % (CN_DIGIT, CN_DIGIT))
+        _rng_m = list(re.finditer(_RANGE_RE, part))
+        if _rng_m:
+            r0, r1 = _rng_m[0].start(), _rng_m[-1].end()
+            segs.append(part)          # 整段作为一条，不拆
+            continue
         marks = list(re.finditer(r"\d{1,2}\s*[:：]\s*\d{1,2}|"
                                  r"(?:上午|下午|中午|早上|早晨|晚上|今晚|明晚|傍晚|夜里|凌晨)?\s*"
                                  r"(?:\d{1,2}|[%s]{1,3})\s*(?:点|時|时)" % CN_DIGIT, part))
-        # 「下午三点到四点」是一个时间区间，不能拆成两个任务
-        if len(marks) >= 2 and re.search(
-                r"(?:点|时)\s*(?:到|至|-|~|～)\s*(?:\d|[一二三四五六七八九十]+)\s*(?:点|时)", part):
-            segs.append(part)
-            continue
         if len(marks) >= 2:
             cut = [0] + [m.start() for m in marks[1:]] + [len(part)]
             for i in range(len(cut) - 1):
@@ -839,6 +917,48 @@ THANKS_RE = re.compile(r"(谢谢|多谢|感谢|辛苦了)")
 DONE_RE = re.compile(r"(做完|完成|搞定|弄好|做好|结束|干完)")
 DEL_RE = re.compile(r"(删除|删掉|去掉|取消)")
 QUERY_RE = re.compile(r"(还剩|还有几|剩下|几件|多少件|进度|情况如何|怎么样)")
+
+# v1.9.9.18：语气词/应答词归一化。用户随口打的「嗯嗯」「哦哦哦」
+# 「谢谢啦」「可以的」「收到啦」都是对话语气，不是任务。
+_TAIL_PARTICLES = "啦了啊呀吧哦喔呗嘛哈嗯哪咯喽"
+_REPEAT_RE = re.compile(r"(.)\1+")
+# 时间指代整句（「本周」「下周」）：只有时间没有事 → 不是任务
+_TIME_ONLY_WORDS = {
+    "本周", "这周", "下周", "上周", "本月", "这月", "下月", "上月",
+    "今年", "明年", "去年", "本季度", "这个月", "下个星期", "这星期",
+}
+
+
+def _normalize_chat(text):
+    """把口头应答压成简形：嗯嗯→嗯，哦哦哦→哦，谢谢啦→谢谢，可以的→可以"""
+    t = (text or "").strip()
+    t = re.sub(r"[\s，,。.：:;；!！?？~～]+", "", t)
+    # 叠字压缩（只对纯口语短句做，避免「妈妈」「爸爸」被压坏）
+    if len(t) <= 8:
+        t = _REPEAT_RE.sub(r"\1", t)
+    # 去掉句尾语气词（同样只对短句）
+    if len(t) <= 8:
+        t = t.rstrip(_TAIL_PARTICLES)
+    return t
+
+
+def _is_pure_chat(text):
+    """整句只是应答/语气/时间指代 → 不该建任务"""
+    raw = re.sub(r"[\s，,。.：:;；!！?？~～]+", "", text or "")
+    # 先看未归一化的原形：「是啊 / 对啊」被归一化后只剩「是」，就查不到了
+    if len(raw) <= 3 and re.fullmatch(r"(?:是|对|好|行|可|能|有|没)[啊呀哦吧呢嘛的了]", raw):
+        return True
+    t = _normalize_chat(text)
+    if not t:
+        return True
+    if t in _TIME_ONLY_WORDS:
+        return True
+    if t in {_normalize_chat(w) for w in NOT_TASK_WHOLE}:
+        return True
+    # 「可以的 / 行的 / 没事的」：极短的「X的」且 X 是应答词
+    if len(t) <= 4 and re.fullmatch(r"(?:可以|行|好|没事|算了|是的|对的)的?", t):
+        return True
+    return False
 
 # 问助手自己是谁 / 让助手介绍自己
 SELF_RE = re.compile(r"(你是谁|你叫(什么|啥|嘛)|你的名字|介绍(一下)?(你|你自己)|"
@@ -915,6 +1035,69 @@ def _is_noise(title):
     return len(rest) < 2
 
 
+def _parse_dur_amount(text):
+    """把「半小时 / 一个半小时 / 2小时 / 三十分钟 / 两刻钟」这类时长
+    解析成 (数量, 单位)。识别不出返回 (0, None)。
+
+    v1.9.9.18：原来用 `group(0)` 里做字符串 replace 判断「半」，
+    「半小时」会被当成 0.5 又再 +0.5 变成 1 小时，「一个半小时」则
+    完全丢掉那半。这里改成显式分支，顺序从长到短，绝不重叠匹配。"""
+    units = r"(?:小时|分钟|秒)"
+    # ① 「一个半小时 / 两个半小时 / 一个半钟头」
+    m = re.search(r"(?:(\d+(?:\.\d+)?)|([%s]{1,3}))\s*个\s*半\s*(?:小时|钟头)"
+                  % CN_DIGIT, text)
+    if m:
+        n = float(m.group(1)) if m.group(1) else float(_num(m.group(2)) or 0)
+        return n + 0.5, "小时"
+    # ② 「半小时 / 半钟头」
+    if re.search(r"半\s*(?:个\s*)?(?:小时|钟头)", text):
+        return 0.5, "小时"
+    # ③ 「两刻钟 / 一刻钟」——先于「X分钟」判断，否则会被当成 2 分钟
+    m = re.search(r"(?:([\d.]+)|([%s]{1,3}))\s*刻\s*钟" % CN_DIGIT, text)
+    if m:
+        n = float(m.group(1)) if m.group(1) else float(_num(m.group(2)) or 0)
+        return n * 15, "分钟"
+    # ④ 普通「数字 + 单位」
+    m = re.search(r"([\d.]+)\s*" + units, text)
+    if m:
+        u = re.search(units, m.group(0)).group(0)
+        return float(m.group(1)), u
+    # ⑤ 中文数字 + 单位（「三十分钟」「两个小时」）
+    m = re.search(r"([%s]{1,3})\s*个?\s*" % CN_DIGIT + units, text)
+    if m:
+        u = re.search(units, m.group(0)).group(0)
+        return float(_num(m.group(1)) or 0), u
+    return 0, None
+
+
+def _soon_bonus(seg, dur):
+    """「15分钟后 / 半小时之内 / 2小时内」这类**截止**表达的临近加分。
+
+    v1.9.9.18：只有带「后/之后/以内/之内/内/截止」才算截止；
+    「跑30分钟的步」「睡7小时」是纯时长（花多久干这事），不加分，
+    否则什么任务一听「半小时」就变紧急，干扰排序。"""
+    if not dur or not re.search(r"(?:后|之后|以内|之内|内|截止)", seg or ""):
+        return 0
+    _amt, _unit = _parse_dur_amount(seg)
+    if not _unit:
+        return 0
+    # 统一折算成分钟再分档，避免「一个半小时」只按 1 小时算
+    _mins = _amt * (1 / 60.0 if _unit == "秒"
+                    else 1.0 if _unit == "分钟" else 60.0)
+    # 加分要够「从 30 分基础分抬进目标档」：紧急≥75、重要≥55
+    if _mins <= 30:
+        return 50            # 30 分钟内 → 紧急（80）
+    if _mins <= 60:
+        return 45            # 1 小时内 → 紧急（75）
+    if _mins <= 120:
+        return 30            # 2 小时内 → 重要（60）
+    if _mins <= 240:
+        return 26            # 半天内 → 重要（56）
+    if _mins <= 720:
+        return 6             # 12 小时内 → 略提
+    return 0
+
+
 def parse_tasks(text, fallback=True):
     """解析成任务列表。fallback=True 时，一句朴素的话（如「去超市买牛奶」）
     即使没匹配到时间也当一件任务；fallback=False 用于「这像不像一句话任务」的判断。"""
@@ -923,6 +1106,9 @@ def parse_tasks(text, fallback=True):
         return []
     whole = re.sub(r"[\s，,。.：:;；!！?？~～]+", "", text)
     if whole in NOT_TASK_WHOLE:
+        return []
+    # v1.9.9.18：口头应答与纯时间指代（嗯嗯 / 谢谢啦 / 本周 / 可以的）不建任务
+    if _is_pure_chat(text):
         return []
     results, seen = [], set()
     prev = None
@@ -963,6 +1149,20 @@ def parse_tasks(text, fallback=True):
         title = clean_title(seg, _t_hits + _hit_extra +
                             [r for r in (dur_raw, due_raw) if r])
         if _is_noise(title):
+            # v1.9.9.18：这一段自带明确时间/日期，说明它是独立的一件事
+            # （「凌晨两点睡，早上七点起」的后半句），不该并进上一条
+            if prev is not None and (find_times(seg) or find_deadline_date(seg)[0]):
+                # 标题太短（只剩一个「起」）就用原段兜底，别让用户看到单字任务
+                if len(re.sub(r"[^\u4e00-\u9fff]", "", title)) < 2:
+                    title = seg.strip()[:8] or title
+                _st_times = find_times(seg)
+                _st_hhmm = _st_times[0][0] if _st_times else None
+                results.append((title, _st_hhmm,
+                                score_task(title, seg, _st_hhmm),
+                                seg, find_duration(seg)[0],
+                                find_repeat(seg), find_deadline_date(seg)[0]))
+                prev = len(results) - 1
+                continue
             # v1.9.9.17：整段都是同一字重复（钟钟钟/水水水）→ 纯噪音，
             # 直接丢弃，不并进上一条污染标题
             if len(clean_seg) >= 2 and len(set(clean_seg)) == 1:
@@ -982,11 +1182,23 @@ def parse_tasks(text, fallback=True):
                                        find_deadline_date(seg)[1]) if r]:
                     _extra = _extra.replace(_h, "", 1)
                 _extra = re.sub(r"[\s，,。.：:；!！?？~～]+", "", _extra)
-                if (_fb_times or _fb_dur or _fb_due) and len(_extra) >= 1:
-                    _fb_title = seg.strip()[:6] or "待办"
+                # v1.9.9.18：还要把残留的时间量词剔干净（「一刻」「三刻」
+                # 里的「刻」原来是实义残留，导致纯时间句被误判成任务）
+                _extra = re.sub(r"[刻分点钟時时半秒]", "", _extra)
+                # 中文字符算实义（「睡」一个字就够），拉丁字母/数字不算
+                _extra_cn = re.sub(r"[^\u4e00-\u9fff]", "", _extra)
+                if (_fb_times or _fb_dur or _fb_due) and len(_extra_cn) >= 1:
+                    # v1.9.9.18：优先用清洗后的 title（「一个小时内交」→「交」），
+                    # 只有 title 实在不能用时才退回原段。单字中文（「交」）在这种
+                    # 「时长+截止」句里是有效缩略，不算噪音。
+                    _ok1 = (len(title) >= 2 and not _is_noise(title))
+                    # 单字标题一律退回原文：清洗把「凌晨两点睡」压成「睡」、
+                    # 「一个小时内交」压成「交」都是信息损失，原文更可读
+                    _fb_title = (title if _ok1 else (seg.strip()[:10] or "待办"))
                     _fb_hhmm = _fb_times[0][0] if _fb_times else None
                     results.append((_fb_title, _fb_hhmm,
-                                    score_task(_fb_title, seg, _fb_hhmm),
+                                    min(100, score_task(_fb_title, seg, _fb_hhmm) +
+                                        _soon_bonus(seg, _fb_dur)),
                                     seg, _fb_dur, find_repeat(seg), _fb_due))
                     prev = len(results) - 1
                     continue
@@ -999,8 +1211,11 @@ def parse_tasks(text, fallback=True):
                 prev_due = prev_t[6] if len(prev_t) > 6 else None
                 # ⚠ 噪音段里带的时间/日期要并入上一条：
                 # 「参加舞会，今天上午11点25分之前，A」的 11:25 就丢在这
-                results[prev] = (t0, hhmm or h0,
-                                 score_task(t0, raw_new, hhmm or h0, passed, offset),
+                # v1.9.9.18：h0 是上一条已有的时间，优先保留它；
+                # 只有上一条没时间时才用这一段的时间（原写法反之，
+                # 导致「凌晨两点睡，早上七点起」被改成 07:00）
+                results[prev] = (t0, h0 or hhmm,
+                                 score_task(t0, raw_new, h0 or hhmm, passed, offset),
                                  raw_new, d0 or dur,
                                  prev_t[5] if len(prev_t) > 5 else None,
                                  seg_due or prev_due)
@@ -1009,19 +1224,9 @@ def parse_tasks(text, fallback=True):
         if title in seen:
             continue
         seen.add(title)
-        # v1.9.9.17：「15分钟后」「半小时后」没有钟点 hhmm，走不到
-        # score_task 里的临近加分。按时长给临近度加分，别让紧急的事
-        # 沉到「一般」档
-        _soon = 0
-        _m = re.search(r"(\d+(?:\.\d+)?)\s*(分钟|小时|秒)", str(dur or ""))
-        if _m:
-            _amt = float(_m.group(1))
-            if _m.group(2) == "秒" or (_m.group(2) == "分钟" and _amt <= 30):
-                _soon = 28
-            elif _m.group(2) == "分钟" and _amt <= 60:
-                _soon = 16
-            elif _m.group(2) == "小时" and _amt <= 2:
-                _soon = 12
+        # v1.9.9.18：只有「15分钟后 / 半小时之内」这类**截止**表达才加
+        # 临近分（纯时长不加），逻辑见 _soon_bonus
+        _soon = _soon_bonus(seg, dur)
         results.append((title, hhmm,
                         min(100, score_task(title, seg, hhmm, passed, offset) + _soon),
                         seg, dur, find_repeat(seg), due_d))

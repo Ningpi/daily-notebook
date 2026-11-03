@@ -344,3 +344,88 @@ class TestV19917QA:
         r = core.parse_tasks("九点钟九点钟九点钟")
         for t in r:
             assert len(set(t[0])) > 1 or len(t[0]) == 1, r
+
+
+class TestV19918QA:
+    """v1.9.9.18：第二轮 QA 报告修复回归"""
+
+    def test_time_range_is_one_task(self):
+        """「9点到11点开会」是一个任务，不是两个"""
+        r = core.parse_tasks("9点到11点开会")
+        assert len(r) == 1, r
+        assert "开会" in r[0][0], r
+
+    def test_adjacent_segments_keep_earlier_time(self):
+        """「凌晨两点睡，早上七点起」两句各留自己的时刻"""
+        r = core.parse_tasks("凌晨两点睡，早上七点起")
+        assert len(r) == 2, r
+        assert r[0][1] == "02:00", r
+        assert r[1][1] == "07:00", r
+
+    def test_quarter_keqing_time(self):
+        """「九点三刻」是 09:45，不是 09:03"""
+        r = core.parse_tasks("九点三刻开会")
+        assert r and r[0][1] == "09:45", r
+
+    def test_pure_quarter_time_dropped(self):
+        """只说「八点一刻」不建任务"""
+        assert core.parse_tasks("八点一刻") == []
+        assert core.parse_tasks("九点三刻") == []
+        assert core.parse_tasks("九点半") == []
+
+    def test_zhong_in_clock_removed(self):
+        """「九点钟开会」标题不该剩「钟」"""
+        r = core.parse_tasks("九点钟开会")
+        assert r and r[0][0] == "开会", r
+
+    def test_weekly_with_clock(self):
+        """「每周三下午2点开会」→ 开会 @14:00"""
+        r = core.parse_tasks("每周三下午2点开会")
+        assert r and r[0][0] == "开会" and r[0][1] == "14:00", r
+
+    def test_half_hour_deadline_scored_urgent(self):
+        """「半小时后开会」和「30分钟后开会」同档"""
+        a = core.parse_tasks("30分钟后开会")[0][2]
+        b = core.parse_tasks("半小时后开会")[0][2]
+        assert a >= 75 and b >= 75, (a, b)
+
+    def test_one_and_half_hour_deadline(self):
+        """「一个半小时后开会」按 1.5 小时算，落在重要档"""
+        r = core.parse_tasks("一个半小时后开会")
+        assert r and 55 <= r[0][2] < 75, r
+
+    def test_two_hours_deadline_important(self):
+        """「2小时内交材料」进重要档"""
+        r = core.parse_tasks("2小时内交材料")
+        assert r and r[0][2] >= 55, r
+
+    def test_pure_duration_not_urgent(self):
+        """「跑30分钟的步」「睡7小时」是纯时长，不该变紧急"""
+        for s in ("跑30分钟的步", "睡7小时", "跑10分钟"):
+            r = core.parse_tasks(s)
+            assert r and r[0][2] < 55, (s, r)
+
+    def test_math_expression_preserved(self):
+        """「1+1=2」标题不能被啃成「+=」"""
+        for s in ("1+1=2", "3*4=12", "15/3"):
+            r = core.parse_tasks(s)
+            assert r and "+=" not in r[0][0] and "*=" not in r[0][0], (s, r)
+        assert core.parse_tasks("1+1=2")[0][0] == "1+1=2"
+
+    def test_casual_replies_are_not_tasks(self):
+        """口头应答不建任务"""
+        for s in ("嗯嗯", "哦哦哦", "哈哈哈", "谢谢啦", "收到啦", "可以的",
+                  "是啊", "对啊", "好吧", "行吧", "本周", "下周"):
+            assert core.parse_tasks(s) == [], s
+
+    def test_real_task_still_parsed(self):
+        """正常任务不受语气词过滤影响"""
+        r = core.parse_tasks("去超市买牛奶")
+        assert r and "牛奶" in r[0][0], r
+        r = core.parse_tasks("妈妈生日快乐")
+        assert r and "生日快乐" in r[0][0], r
+
+    def test_kuazhong_duration(self):
+        """「两刻钟后开会」= 30 分钟 → 紧急"""
+        r = core.parse_tasks("两刻钟后开会")
+        assert r and r[0][0] == "开会" and r[0][2] >= 75, r

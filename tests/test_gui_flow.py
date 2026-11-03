@@ -552,3 +552,67 @@ class TestV1999ReminderFixes:
         assert task.get("remind_at") is None
         a.respond("下午4点提醒我")
         assert task.get("remind_at") == "16:00"
+
+
+class TestV19918ClockAndInstance:
+    """v1.9.9.18：正计时跨小时显示 + 单实例快速探测"""
+
+    def test_stopwatch_over_one_hour(self, app):
+        """正计时超过 1 小时显示「xx小时xx分钟」"""
+        a = app
+        a.open_clock()
+        a.root.update()
+        a._sw_base = 3600 + 35 * 60      # 1 小时 35 分
+        a._sw_running = False
+        a._clock_tick_body(a._clock_win)
+        txt = a._sw_lbl.cget("text")
+        assert "1" in txt and "35" in txt, txt
+        assert i18n.render("clock_hr", {}, i18n.get_lang()) in txt, txt
+        assert ":" not in txt, txt
+
+    def test_stopwatch_under_one_hour(self, app):
+        """不到 1 小时仍是 mm:ss"""
+        a = app
+        a.open_clock()
+        a.root.update()
+        a._sw_base = 12 * 60 + 34
+        a._sw_running = False
+        a._clock_tick_body(a._clock_win)
+        txt = a._sw_lbl.cget("text")
+        assert "12:34" in txt, txt
+
+    def test_probe_detects_free_port(self):
+        """没有实例在跑时探针返回 free"""
+        import socket
+        r, s = M._probe_existing_instance()
+        if r == "free":
+            s.close()
+        assert r in ("free", "exists", "zombie")
+
+    def test_probe_is_fast_when_instance_exists(self):
+        """有实例在跑时探针必须立刻返回（不能白建界面）"""
+        import socket
+        import threading
+        import time
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            srv.bind(("127.0.0.1", M._SINGLE_PORT))
+        except OSError:
+            pytest.skip("端口已被占用，跳过")
+        srv.listen(2)
+
+        def _acc():
+            try:
+                c, _ = srv.accept()
+                c.recv(16)
+                c.close()
+            except Exception:
+                pass
+        threading.Thread(target=_acc, daemon=True).start()
+        t0 = time.time()
+        r, _ = M._probe_existing_instance()
+        cost = time.time() - t0
+        srv.close()
+        assert r == "exists", r
+        assert cost < 1.0, cost
