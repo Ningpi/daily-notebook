@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.24"
+VERSION = "1.9.9.25"
 
 
 # ----------------------------------------------------------------- 配色
@@ -2866,13 +2866,30 @@ class NoteApp(object):
         return bool(_re.search(r"(天气预报|说是有|听说|据说是|好像说)", seg or ""))
 
     @staticmethod
+    def _strip_action(t):
+        """剥掉动作词再比相似度（v1.9.9.25）。
+
+        「取消写周报」和「写周报」语义完全相反，但按子串判会被当成同一
+        件事——用户看到「已有相似任务『取消写周报』」会懵。"""
+        import re as _re
+        return _re.sub(r"^(?:取消|删除|删掉|去掉|完成|做完|搞定|不要|撤销)"
+                       r"(?:掉|了)?\s*", "", (t or "").strip())
+
+    @staticmethod
     def _same_title(a, b):
         """标题是否指同一件事（去空格、小写后互为子串或相等）"""
         a = (a or "").replace(" ", "").lower()
         b = (b or "").replace(" ", "").lower()
         if not a or not b:
             return False
-        return a == b or a in b or b in a
+        if a == b or a in b or b in a:
+            return True
+        # v1.9.9.25：剥掉动作词后再比（「取消写周报」≠「写周报」）
+        a2 = NoteApp._strip_action(a)
+        b2 = NoteApp._strip_action(b)
+        if a2 and b2 and a2 != a or b2 != b:
+            return bool(a2 and b2 and (a2 == b2 or a2 in b2 or b2 in a2))
+        return False
 
     def _find_similar(self, title):
         """找已存在的相似任务标题；没有则 None。完全相同的优先返回。"""
@@ -3059,8 +3076,13 @@ class NoteApp(object):
     def _pri_re(self):
         import re as _re
         if self.PRI_RE is None:
+            # v1.9.9.25：口语也要认——真实用户看到「A.紧急 B.重要」会直接
+            # 回「急」「着急」「普通」「随便」，原来只认「紧急/很急」，
+            # 回「急」会掉进任务解析器（P0-2）
             self.PRI_RE = _re.compile(
-                r"(?<![A-Za-z])([ABCD])(?![A-Za-z])|紧急|很急|非常重要|重要|一般|不急|不赶|"
+                r"(?<![A-Za-z])([ABCD])(?![A-Za-z])|"
+                r"紧急|很急|着急|好急|太急|急|非常重要|重要|一般|普通|"
+                r"不急|不赶|随便|都行|无所谓|"
                 r"urgent|important|normal|low priority", _re.I)
         return self.PRI_RE
 
@@ -3154,6 +3176,19 @@ class NoteApp(object):
             self._pending_task = None
             return False, None, text
 
+        # P0-3 / 建议3、4（v1.9.9.25）：追问状态的兜底出口。
+        # 原来只要进了 pri 追问，用户回「确认 / 好 / 取消」或说一句
+        # 明显的新任务都被吞掉，甚至把「确认」建成任务。现在：
+        #  - 纯应答词（确认/好的/取消/算了）→ 直接结束追问，不建任务
+        #  - 明显的新任务句（带动作动词且不是纯时间）→ 退出追问，按新任务处理
+        _s = (text or "").strip()
+        if re.fullmatch(r"(?:确认|确定|好的?|可以|行|嗯+|哦+|取消|算了|不用了?|"
+                        r"ok|okay|yes|no|算了)[\s。.！!～~]*", _s, re.I):
+            self._pending_task = None
+            if getattr(self, "_pending_q", None) == "pri":
+                self._pending_q = None
+            return True, tr("pri_skipped", t=task["title"]), ""
+
         need_pri = pt.get("need_pri")
         need_dl = pt.get("need_dl")
         m = self._pri_re().search(text)
@@ -3171,14 +3206,25 @@ class NoteApp(object):
                             "due": (_d[0].isoformat() if _d and _d[0] else None),
                             "off": _t[3] if len(_t) > 3 else 0}
                 eng_time = self._smart_meridiem(text, eng_time)
+        def _miss():
+            """没认出是回答 → 计数；连续 2 次就放弃追问、按默认值收尾
+            （v1.9.9.25，建议7/3：别让用户卡在问答里出不来）"""
+            pt["miss"] = int(pt.get("miss") or 0) + 1
+            if pt["miss"] >= 2:
+                self._pending_task = None
+                if getattr(self, "_pending_q", None) == "pri":
+                    self._pending_q = None
+                self.store.save()
+                self._miss_reply = tr("pri_skipped", t=task["title"])
+            return False, None, text
         # 完全不像回答（没字母没时间也没说没有）→ 当普通输入处理。
         # 引擎解析出的时间也算「时间」（「明天下午三点」旧正则接不住，v1.9.5），
         # 但必须防住「晚上八点提醒我做20个俯卧撑」这种带动作的整句新任务：
         # 只有「整句就是时间」才算回答，否则交给新任务解析。
         if (eng_time or time_m) and not m and not no_dl and not self._is_pure_time_reply(text):
-            return False, None, text
+            return _miss()
         if not m and not time_m and not no_dl and not eng_time:
-            return False, None, text
+            return _miss()
         # P1 问题5（v1.9.9.22）：「A 明天下午三点开会」——字母前缀会被当成
         # 优先级回答、后半句被吞掉。剥掉字母前缀后若剩下带**动作动词**的
         # 实义任务，整句按新任务处理。注意不能用 _taskish（「点」「周」
@@ -3195,12 +3241,14 @@ class NoteApp(object):
             letter = (m.group(1) or m.group(0)).strip().upper()
             table = {"A": "pri_a", "B": "pri_b", "C": "pri_c", "D": "pri_d"}
             if letter not in table:
+                # v1.9.9.25：口语映射补全——「急/着急」也算 A，
+                # 「普通」算 C，「随便/都行/无所谓」算 D（P0-2）
                 low = m.group(0).lower()
-                if "urgent" in low or "紧急" in low or "很急" in low:
+                if ("urgent" in low or "紧急" in low or "急" in low) and "不急" not in low:
                     letter = "A"
                 elif "important" in low or "重要" in low:
                     letter = "B"
-                elif "normal" in low or "一般" in low:
+                elif "normal" in low or "一般" in low or "普通" in low:
                     letter = "C"
                 else:
                     letter = "D"
@@ -3734,7 +3782,7 @@ class NoteApp(object):
                 return self._ask_remind_text(task)
             return None
         self._pending_task = {"id": task["id"], "need_pri": need_pri,
-                              "need_dl": need_dl}
+                              "need_dl": need_dl, "miss": 0}
         self._pending_q = "pri"
         hey = tr("hey_name", name=self.nickname) if self.nickname else ""
         if need_pri and need_dl:
@@ -3778,12 +3826,18 @@ class NoteApp(object):
         s = (text or "").strip()
         stage = int(getattr(self.store, "setup_stage", 0) or 0)
         # 还没问过 → 第一句先自我介绍，再问称呼
+        # v1.9.9.25（P0-1）：如果第一句本身就是任务（「数学作业」），
+        # 先把它记下来再问称呼，不能吞掉用户的正事
         if stage == 0:
             self.store.setup_stage = 1
             self.store.save()
             bot = getattr(self.store, "bot_name", "") or (
                 "小宁" if not i18n.is_en() else "Note")
-            return tr("intro_first", bot=bot) + "\n" + tr("ask_user_name")
+            intro = tr("intro_first", bot=bot) + "\n" + tr("ask_user_name")
+            if s and self._taskish(s) and not core.extract_name(s):
+                self._finish_onboarding(None)
+                return tr("onboard_task_first") + "\n\n" + self.respond(s)
+            return intro
         if stage != 1:
             return None
 
@@ -3799,9 +3853,17 @@ class NoteApp(object):
             self._finish_onboarding(None)
             return tr("onboard_skipped") + "\n" + tr("usage_guide")
 
+        # v1.9.9.25（P0-1 另一半）：用户在回答优先级/时间时说的「B」「今晚9点」
+        # 不能被当成昵称。单个字母、纯时间、纯数字都不像名字。
+        if re.fullmatch(r"[A-DFa-df]|[\d\s:：点分半]+|今晚|明天|下午|晚上|上午|早上|中午",
+                        s) or self._is_pure_time_reply(s):
+            self._finish_onboarding(None)
+            return tr("onboard_no_name_ok") + "\n" + tr("usage_guide")
+
         # P0 问题4（v1.9.9.22）：像派活儿的短句（交作业 / 帮我买牛奶 /
         # 明天3点开会）先按任务处理，绝不能被 extract_name 的短名兜底
         # 当成昵称收下
+        # v1.9.9.25（P0-1）：先记账再问称呼——任务绝不丢
         if self._taskish(s):
             self._finish_onboarding(None)
             return tr("onboard_as_task") + "\n\n" + self.respond(s)
@@ -4242,6 +4304,14 @@ class NoteApp(object):
         matched, reply, rest = self._apply_pri_answer(text)
         if matched:
             return reply
+        # v1.9.9.25：连续答不上来已自动收尾 → 本次输入按新内容处理，
+        # 把「已按默认优先级记着」的交代拼在前面
+        _miss_reply = getattr(self, "_miss_reply", None)
+        if _miss_reply:
+            self._miss_reply = None
+            _sub = self.respond(text)
+            sep = "\n" if i18n.is_en() else "\n"
+            return _miss_reply + (sep + _sub if _sub else "")
         text = rest or text
 
         # 上一轮在等用户确认「过期的截止时间」（v1.9.4）
@@ -4266,6 +4336,11 @@ class NoteApp(object):
             pz = core
         parsed_now = pz.parse_tasks(text)
 
+        # 对话查列表（v1.9.9.25，P0-5）：用户说「列表 / 我的任务 /
+        # 今天有什么任务」时播报未完成 Top5。原来这些都被建成任务。
+        if self._is_list_query(text):
+            return self._list_report()
+
         # 查询进度
         if pz.QUERY_RE.search(text) and not parsed_now:
             left = [x for x in self.store.tasks if not x.get("done")]
@@ -4274,21 +4349,96 @@ class NoteApp(object):
             top = sorted(left, key=lambda x: -x.get("score", 0))[0]
             return tr("left_some", n=len(left), title=top["title"])
 
-        # 勾选意图
+        # 勾选意图（v1.9.9.25 全面扩语序，P0-4）
+        # 支持：「完成/完成了/做完/做完了/搞定/搞定了/做好 + 任务名」
+        #       「任务名 + 完成了/做完了/搞定了」
+        #       「完成第一个 / 做完了第二条」（按未完成列表序号）
         if pz.DONE_RE.search(text) and len(text) <= 24:
-            cand = [x for x in parsed_now if not pz.DONE_RE.search(x[0])]
-            if cand:
-                target = cand[0][0]
-                for task in self.store.tasks:
-                    if self._match(target, task["title"]):
-                        if not task.get("done"):
-                            task["done"] = True
-                            task["done_at"] = dt.datetime.now().strftime("%H:%M")
-                            self.store.save()
-                            return self._praise(tr("done_ok", title=task["title"]))
-                return tr("done_notfound", title=target)
+            done_title = self._done_target(text, parsed_now, pz)
+            # v1.9.9.25：序号形式优先（「完成第一个」「做完了第二条」），
+            # 否则会被当成叫「第二条」的任务名
+            if re.search(r"第\s*(?:[0-9]+|[一二三四五六七八九十]{1,3})\s*[个条项件]?",
+                         (text or "")):
+                idx_title = self._done_by_index(text)
+                if idx_title is not None:
+                    return idx_title
+            if done_title is None:
+                return tr("done_notfound", title=(text or "").strip())
+            for task in self.store.tasks:
+                if self._match(done_title, task["title"]):
+                    if not task.get("done"):
+                        task["done"] = True
+                        task["done_at"] = dt.datetime.now().strftime("%H:%M")
+                        self.store.save()
+                        self.store.sync_history()
+                        self.refresh_tasks()
+                        return self._praise(tr("done_ok", title=task["title"]))
+            return tr("done_notfound", title=done_title)
+
+        # 改时间意图（v1.9.9.25）：「把开会改到下午4点」「开会改成明天3点」
+        m_adj = re.match(r"^[\s，,]*(?:帮我|请)?(?:把|将)?\s*(.+?)\s*"
+                         r"(?:改到|改成|改为|挪到|调整到|调到)\s*(.+)$",
+                         (text or "").strip())
+        if m_adj:
+            name, when = m_adj.group(1).strip(), m_adj.group(2).strip()
+            for task in self.store.tasks:
+                if self._match(name, task["title"]):
+                    _t = (core.find_times(when) or [None])[0]
+                    if not _t:
+                        break
+                    _d = core.find_deadline_date(when)
+                    task["hhmm"] = _t[0]
+                    task["due_date"] = _d[0].isoformat() if _d and _d[0] else task.get("due_date")
+                    task["deadline_txt"] = (task["due_date"] and
+                                            "%s %s" % (
+                                                "%d月%d日" % (int(task["due_date"][5:7]),
+                                                             int(task["due_date"][8:10])),
+                                                _t[0])) or _t[0]
+                    task["_from_raw"] = False
+                    self._push_undo({"kind": "deadline", "id": task["id"]})
+                    self.store.save()
+                    self.refresh_tasks()
+                    return tr("dl_set", t=task["title"], d=task["deadline_txt"])
 
         # 删除意图
+        # v1.9.9.25：补「取消写周报 / 不要写周报了」以及「删除第二个任务」
+        _cancel = re.match(r"^[\s，,]*(?:帮我|请)?(?:取消|不要了?|不做了?|别做)"
+                           r"(?:掉|了)?\s*(.+?)(?:了|吧|啦)?\s*[。.！!～~]*$",
+                           (text or "").strip())
+        if _cancel and len(text) <= 20:
+            _nm = _cancel.group(1).strip()
+            if _nm and _nm not in ("任务", "待办"):
+                for i, task in enumerate(list(self.store.tasks)):
+                    if self._match(_nm, task["title"]):
+                        self._push_undo({"kind": "delete", "id": task["id"],
+                                         "task": dict(task), "index": i,
+                                         "label": "删除【%s】" % task["title"]})
+                        self.store.tasks.pop(i)
+                        self.store.save()
+                        self.refresh_tasks()
+                        return tr("deleted", title=task["title"])
+        _del_idx = re.match(r"^[\s，,]*(?:删|删除|去掉|删掉)\s*第\s*"
+                            r"([0-9]+|[一二三四五六七八九十]{1,3})\s*[个条项件]?"
+                            r"(?:任务|待办|的)?\s*$", (text or "").strip())
+        if _del_idx:
+            raw = _del_idx.group(1)
+            try:
+                idx = int(raw)
+            except ValueError:
+                idx = core._num(raw)
+            left = [x for x in self.sorted_tasks() if not x[1].get("done")]
+            if idx and 1 <= int(idx) <= len(left):
+                task = left[int(idx) - 1][1]
+                i = self.store.tasks.index(task)
+                self._push_undo({"kind": "delete", "id": task["id"],
+                                 "task": dict(task), "index": i,
+                                 "label": "删除【%s】" % task["title"]})
+                self.store.tasks.pop(i)
+                self.store.save()
+                self.refresh_tasks()
+                return tr("deleted", title=task["title"])
+            return tr("done_notfound", title="第%s个任务" % raw)
+
         if pz.DEL_RE.search(text) and parsed_now:
             target = parsed_now[0][0]
             for i, task in enumerate(list(self.store.tasks)):
@@ -4983,6 +5133,102 @@ class NoteApp(object):
     def encourage(self, seed=0):
         pool = i18n.t("encourage")
         return pool[seed % len(pool)]
+
+    def _done_target(self, text, parsed_now, pz):
+        """从完成语句里抽出任务名（v1.9.9.25，P0-4）。
+
+        「完成数学作业」→ 数学作业
+        「数学作业完成了」→ 数学作业
+        「做完了数学作业」→ 数学作业
+        抽不出返回 None（交给序号分支）。"""
+        import re as _re
+        t = (text or "").strip()
+        DONE = r"(?:已经)?(?:完成|做完|搞定|做好|干完|弄好|结束)(?:了)?"
+        # ① 前置：「完成/做完了 XX」
+        m = _re.match(r"^[\s，,]*(?:我)?(?:已经)?(?:把)?(?:完成|做完|搞定|做好|干完|弄好)"
+                      r"(?:了|掉)?\s*[，,]?\s*(.+)$", t)
+        if m:
+            cand = m.group(1).strip(" 的了，,。.！!？?")
+            if cand and not _re.fullmatch(r"[第\d一二三四五六七八九十]+[个条项]?", cand):
+                return cand
+        # ② 后置：「XX 完成了 / 做完了」
+        m = _re.match(r"^[\s，,]*(?:我)?(?:已经)?(?:把)?(.+?)\s*(?:已经)?"
+                      r"(?:完成|做完|搞定|做好|干完|弄好|结束)(?:了|掉)?\s*[。.！!～~]*$", t)
+        if m:
+            cand = m.group(1).strip(" 的了，,。.！!？?")
+            cand = _re.sub(r"^(?:我|把|将)\s*", "", cand)
+            if cand and not _re.fullmatch(r"[第\d一二三四五六七八九十]+[个条项]?", cand):
+                return cand
+        # ③ 序号形式（「完成第一个」）：交给调用方的序号分支
+        if _re.fullmatch(r"[\s，,]*(?:完成|做完|搞定|做好|干完|弄好|删|删除|删掉)?\s*"
+                         r"第\s*(?:[0-9]+|[一二三四五六七八九十]+)\s*[个条项件]?\s*"
+                         r"(?:任务|待办)?\s*[。.！!～~]*", t):
+            return None
+        # ④ 回退到解析器结果（去掉标题里的完成词）
+        cand = [x for x in parsed_now if not pz.DONE_RE.search(x[0])]
+        if cand:
+            return cand[0][0]
+        # ④ 标题里带着完成词：剥掉后再试（「完成数学作业」被解析成整句时）
+        if parsed_now:
+            ttl = _re.sub(DONE, "", parsed_now[0][0]).strip(" 的了，,。.")
+            if ttl:
+                return ttl
+        return None
+
+    def _done_by_index(self, text):
+        """「完成第一个 / 做完了第2条」按当前排序的未完成任务勾选"""
+        import re as _re
+        m = _re.search(r"第\s*([0-9]+|[一二三四五六七八九十]{1,3})\s*[个条项件]?", text or "")
+        if not m:
+            return None
+        raw = m.group(1)
+        try:
+            idx = int(raw)
+        except ValueError:
+            idx = core._num(raw) if hasattr(core, "_num") else None
+            if idx is None:
+                return None
+        left = [x for x in self.sorted_tasks() if not x[1].get("done")]
+        if not left:
+            return tr("left_none")
+        if 1 <= int(idx) <= len(left):
+            task = left[int(idx) - 1][1]
+            if not task.get("done"):
+                task["done"] = True
+                task["done_at"] = dt.datetime.now().strftime("%H:%M")
+                self.store.save()
+                self.store.sync_history()
+                self.refresh_tasks()
+            return self._praise(tr("done_ok", title=task["title"]))
+        return tr("done_notfound", title="第%s个任务" % raw)
+
+    def _is_list_query(self, text):
+        """「列表 / 我的任务 / 今天有什么任务 / 看看待办」这类查列表意图"""
+        import re as _re
+        t = (text or "").strip()
+        if len(t) > 16:
+            return False
+        if _re.fullmatch(r"[\s，,]*(?:我的|所有|全部|今天的?|当前的?)?"
+                         r"(?:任务|待办|列表|清单|todo|list)(?:列表|清单)?"
+                         r"(?:呢|吗|？|\?)?[\s。.！!～~]*", t, _re.I):
+            return True
+        return bool(_re.fullmatch(
+            r"[\s，,]*(?:今天|现在|当前)?(?:我)?(?:还)?(?:有|剩下?)"
+            r"(?:什么|哪些|几个|多少)(?:任务|待办|事|活儿|没做的?|没完成的?)"
+            r"(?:呢|吗|？|\?)?[\s。.！!～~]*", t))
+
+    def _list_report(self):
+        """播报未完成任务（按分数排序，最多 5 条）"""
+        left = [x for x in self.sorted_tasks() if not x[1].get("done")]
+        if not left:
+            return tr("left_none")
+        lines = []
+        for i, (_k, task) in enumerate(left[:5], 1):
+            hh = task.get("hhmm")
+            mark = " %s" % hh if hh else ""
+            lines.append("  %d. %s%s" % (i, task["title"], mark))
+        more = "" if len(left) <= 5 else tr("list_more", n=len(left) - 5)
+        return tr("list_report", n=len(left), lines="\n".join(lines), more=more)
 
     @staticmethod
     def _match(target, title):

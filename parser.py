@@ -1004,7 +1004,15 @@ def _is_pure_chat(text):
     # 但带动作/安排的不拦（「下雨天记得带伞」仍可记）
     if re.search(r"天气(不错|很好|真好|挺好|不赖|好棒|太好了)", text or ""):
         return True
-    if len(t) <= 8 and re.fullmatch(r"(?:今天|明天|昨天|外面)?天气(?:真|很|好)?(不错|好|棒)?", t):
+    # v1.9.9.25（P1）：问天气、说状态（「今天天气怎么样」「我累了」）也不是任务
+    if re.search(r"天气(怎么样|如何|咋样|好吗|冷不冷|热不热)", text or ""):
+        return True
+    if len(t) <= 8 and re.fullmatch(r"(?:今天|明天)?天气(?:怎么样|如何|真好|不错)?", t):
+        return True
+    if re.fullmatch(r"(?:我|今天|真的|有点|好|太|很)*(?:累|困|饿|渴|烦|难受|无聊|开心|高兴)"
+                    r"(?:了|啊|呀|呢|死)*", t):
+        return True
+    if len(t) <= 8 and re.fullmatch(r"(?:今天|明天|昨天)?天气(?:真|很|好)?(不错|好|棒)?", t):
         return True
     return False
 
@@ -1249,6 +1257,25 @@ def parse_tasks(text, fallback=True):
             # 「晚上8点」剔掉时间后一个汉字都不剩）不能独立成任务，
             # 仍并进上一条——只有剔完时间还剩实义字（「睡」「起」）才算独立
             _cn_left = len(re.sub(r"[^\u4e00-\u9fff]", "", title))
+            # v1.9.9.25（P1）：「写周报，周五前交」里的「周五前交」只有
+            # 「时间 + 单字动词」，没有自己的宾语 → 是前一条的**截止时间**，
+            # 该并回上一条而不是新建任务。判定：剔完时间/时长/日期后
+            # 剩余汉字 ≤ 2 且属于「交/做/完成/给」这类补语动词。
+            _verb_tail = (_cn_left <= 2 and re.fullmatch(
+                r"[交做给发写完成为办好弄好备用]", title or ""))
+            if prev is not None and _verb_tail:
+                prev_t = results[prev]
+                _s_times = find_times(seg)
+                _s_h = _s_times[0][0] if _s_times else None
+                _s_due = find_deadline_date(seg)[0]
+                raw_new = prev_t[3] + " " + seg
+                results[prev] = (prev_t[0], prev_t[1] or _s_h,
+                                 score_task(prev_t[0], raw_new,
+                                            prev_t[1] or _s_h),
+                                 raw_new, prev_t[4],
+                                 prev_t[5] if len(prev_t) > 5 else None,
+                                 _s_due or (prev_t[6] if len(prev_t) > 6 else None))
+                continue
             if prev is not None and _cn_left >= 1 and (find_times(seg) or find_deadline_date(seg)[0]):
                 # 标题太短（只剩一个「起」）就用原段兜底，别让用户看到单字任务
                 if len(re.sub(r"[^\u4e00-\u9fff]", "", title)) < 2:

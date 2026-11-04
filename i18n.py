@@ -313,6 +313,16 @@ STRINGS = {
     "ask_user_name_again": ("没太听清，你希望我怎么称呼您呢？直接说名字就行，比如「小李」",
                             "I didn't catch that. What should I call you? Just the name, e.g. \"Alex\""),
     "name_ok": ("{name}，记住了。", "Got it, {name}."),
+    # v1.9.9.25：追问被「确认/好的/算了」这类应答收尾时，明确交代任务还在
+    "pri_skipped": ("好，【{t}】先按默认优先级记着，之后想调整随时说。",
+                    "Okay — \"{t}\" is saved with the default priority."),
+    # v1.9.9.25（P0-1）：第一句就是任务 → 先记账，再补问称呼
+    "onboard_task_first": ("先帮你记下了——这件事不会丢。顺便问一句：你希望我怎么称呼你？（不想设就直接继续说要做什么）",
+                           "Noted that first — nothing gets lost. By the way, what should I call you?"),
+    # v1.9.9.25：对话里查列表（P0-5）
+    "list_report": ("现在有 {n} 件没做：\n{lines}{more}",
+                    "You have {n} open task(s):\n{lines}{more}"),
+    "list_more": ("\n  …还有 {n} 件", "\n  …and {n} more"),
     # v1.9.9.23：任何时候改昵称（跳过取名后也能补）
     "user_name_changed": ("好，以后就叫你{name}了（原来叫{old}）。",
                           "Okay, I'll call you {name} from now on (was {old})."),

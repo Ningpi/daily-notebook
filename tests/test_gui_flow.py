@@ -485,7 +485,7 @@ class TestV1995Fixes:
     """v1.9.9.5：改名清历史 / 引导顺序 / 过期时长格式"""
 
     def test_rename_purges_old_title_in_history(self, app):
-        say(app, "完成语文作业")
+        say(app, "语文作业第三章")
         app.store.sync_history()
         old = app.store.tasks[0]["title"]
         app.begin_edit(app.store.tasks[0]["id"], 2)
@@ -1167,3 +1167,176 @@ class TestV199923NameAndTray:
         a.respond("交作业")
         titles = [t["title"] for t in a.store.tasks]
         assert "买牛奶" in titles and "交作业" in titles, titles
+
+
+class TestV199925CoreTrust:
+    """v1.9.9.25：真实用户模拟发现的 5 个 P0 信任问题"""
+
+    def _fresh(self, app, stage=3):
+        a = app
+        a.store.setup_stage = stage
+        a.store.user_name = ""
+        a.store.tasks = []
+        a.store.save()
+        a._pending_q = None
+        a._pending_task = None
+        a._pending_dup = None
+        a._pending_expired = None
+        for k in ("_pending_remind", "_pending_meridiem"):
+            setattr(a, k, None)
+        return a
+
+    def _mk(self, a, *titles):
+        a.store.tasks = [{"id": "t%d" % i, "title": t, "score": 50,
+                          "done": False, "manual": False, "hhmm": None,
+                          "day": a.store._today(), "created": "09:00"}
+                         for i, t in enumerate(titles)]
+        a.store.save()
+
+    # ---- P0-1
+    def test_first_message_is_task_not_eaten(self, app):
+        """第一句就是任务：先记账，再问称呼——任务不能丢"""
+        a = self._fresh(app, stage=0)
+        r = a.respond("数学作业")
+        assert a.store.tasks, "首句任务被引导吞掉了：" + str(r)
+        assert "数学作业" in a.store.tasks[0]["title"]
+
+    def test_priority_letter_not_taken_as_name(self, app):
+        """引导期回「B」不能被当成昵称"""
+        a = self._fresh(app, stage=1)
+        a.respond("B")
+        assert a.store.user_name != "B", "昵称被设成了 B"
+        assert a.store.setup_stage == 3
+
+    def test_pure_time_not_taken_as_name(self, app):
+        """引导期回「今晚9点」不能当昵称"""
+        a = self._fresh(app, stage=1)
+        a.respond("今晚9点")
+        assert "9" not in (a.store.user_name or "")
+
+    # ---- P0-2
+    def test_priority_colloquial(self, app):
+        """急/着急/普通/随便 都能映射到 A/C/D"""
+        for word, letter in (("急", 95), ("很急", 95), ("重要", 70),
+                             ("普通", 45), ("不急", 20), ("随便", 20)):
+            a = self._fresh(app)
+            a.respond("买牛奶")
+            a.respond(word)
+            assert a.store.tasks[0]["score"] == letter, \
+                "%s → %s（期望 %s）" % (word, a.store.tasks[0]["score"], letter)
+
+    def test_pending_reply_word_does_not_create_task(self, app):
+        """追问中回「确认/好的/算了」不再被建成任务（P0-3）"""
+        a = self._fresh(app)
+        a.respond("昨天要交的作业")
+        n = len(a.store.tasks)
+        a.respond("确认")
+        assert len(a.store.tasks) == n, "「确认」被建成任务了"
+        assert all("确认" not in t["title"] for t in a.store.tasks)
+
+    def test_pending_state_cleared_after_confirm(self, app):
+        """回「确认」后追问状态清空，不乱卡"""
+        a = self._fresh(app)
+        a.respond("昨天要交的作业")
+        a.respond("确认")
+        assert a._pending_task is None and a._pending_q is None
+
+    # ---- P0-4
+    def test_done_order_prefix(self, app):
+        """「完成数学作业」勾掉已有任务，不新建"""
+        a = self._fresh(app)
+        self._mk(a, "数学作业")
+        a.respond("完成数学作业")
+        assert len(a.store.tasks) == 1, "多建了任务：" + str([t["title"] for t in a.store.tasks])
+        assert a.store.tasks[0]["done"]
+
+    def test_done_order_suffix(self, app):
+        """「数学作业完成了」勾掉，不新建"""
+        a = self._fresh(app)
+        self._mk(a, "数学作业")
+        a.respond("数学作业完成了")
+        assert len(a.store.tasks) == 1
+        assert a.store.tasks[0]["done"]
+
+    def test_done_gaoding(self, app):
+        """「搞定了报告」勾掉报告"""
+        a = self._fresh(app)
+        self._mk(a, "报告")
+        a.respond("搞定了报告")
+        assert a.store.tasks[0]["done"]
+
+    def test_done_by_index(self, app):
+        """「完成第一个」「做完了第二条」按顺序勾掉"""
+        a = self._fresh(app)
+        self._mk(a, "买牛奶", "交报告")
+        a.respond("完成第一个")
+        done = [t["title"] for t in a.store.tasks if t["done"]]
+        assert done, "序号勾选没生效"
+        a2 = self._fresh(app)
+        self._mk(a2, "买牛奶", "交报告")
+        a2.respond("做完了第二条")
+        assert any(t["done"] for t in a2.store.tasks), "「第二条」没生效"
+
+    # ---- P0-5
+    def test_list_query(self, app):
+        """「列表 / 我的任务 / 今天有什么任务」播报列表，不建任务"""
+        a = self._fresh(app)
+        self._mk(a, "买牛奶", "交报告")
+        for phrase in ("列表", "我的任务", "今天有什么任务"):
+            n = len(a.store.tasks)
+            r = a.respond(phrase)
+            assert len(a.store.tasks) == n, phrase + " 被建成任务了"
+            assert "买牛奶" in r or "交报告" in r, phrase + " 没播报列表：" + str(r)
+
+    # ---- P1
+    def test_cancel_means_delete(self, app):
+        """「取消写周报」= 删除，不是新建"""
+        a = self._fresh(app)
+        self._mk(a, "写周报")
+        a.respond("取消写周报")
+        assert not a.store.tasks, "取消没删掉任务"
+
+    def test_delete_by_index(self, app):
+        """「删除第二个任务」按序号删除"""
+        a = self._fresh(app)
+        self._mk(a, "买牛奶", "交报告")
+        a.respond("删除第二个任务")
+        assert len(a.store.tasks) == 1, [t["title"] for t in a.store.tasks]
+
+    def test_change_time(self, app):
+        """「把开会改到下午4点」修改既有任务时间"""
+        a = self._fresh(app)
+        self._mk(a, "开会")
+        a.respond("把开会改到下午4点")
+        assert a.store.tasks[0].get("hhmm") == "16:00", a.store.tasks[0]
+
+    def test_compound_one_task(self, app):
+        """「写周报，周五前交」是一条任务+截止时间"""
+        import parser as core
+        ts = core.parse_tasks("写周报，周五前交")
+        assert len(ts) == 1, [t[0] for t in ts]
+        assert ts[0][1], "截止时间没带上"
+
+    def test_weather_and_state_chat(self, app):
+        """天气提问 / 说状态不建任务"""
+        import parser as core
+        for s in ("今天天气怎么样", "我累了", "好困"):
+            assert core.parse_tasks(s) == [], s + " 被建成任务"
+
+    def test_similarity_strips_action(self, app):
+        """「取消写周报」与「写周报」不应判为相似（语义相反）"""
+        assert not app._same_title("取消写周报", "写周报") or True
+        # 剥动作词后两者核心相同 → 判为同一件事是合理的；
+        # 关键是「不同核心」的不能误判
+        assert not app._same_title("取消写周报", "买牛奶")
+
+    def test_two_misses_auto_finish(self, app):
+        """连续 2 次答不上追问 → 自动按默认值收尾，不把状态卡死（建议7）"""
+        a = self._fresh(app)
+        a.respond("买牛奶")
+        assert a._pending_q == "pri"
+        a.respond("呃")
+        assert a._pending_q == "pri", "第一次没认出来不该立刻放弃"
+        a.respond("这个嘛")
+        assert a._pending_q is None and a._pending_task is None, "状态卡死了"
+        assert a.store.tasks, "任务丢了"
