@@ -270,6 +270,8 @@ STRINGS = {
                       "Nice to meet you. What should I call you? (e.g. \"call me Alex\")\n"
                       "No nickname needed — just tell me a task, e.g. \"meeting at 3pm\"."),
     "enter_send_hint": ("回车发送", "Enter to send"),
+    "focus_hint": ("在下面输入要做的事，回车即可记录",
+                   "Type below and press Enter"),
     "empty_hint": ("今天还没有任务", "No tasks yet"),
     "empty_add": ("＋ 记一条", "+ Add one"),
     "to_tray": ("已收进系统托盘，提醒照常，点托盘图标可打开。",

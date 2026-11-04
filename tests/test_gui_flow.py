@@ -100,17 +100,27 @@ class TestDialogAddTask:
         assert len(app.store.tasks) == 1
         assert app.store.tasks[0]["score"] == 95
 
-    def test_expired_multi_queue_all_handled(self, app):
+    def test_expired_multi_queue_all_handled(self, app, monkeypatch):
         """回归：一句话里多条过期任务，曾只加第一条、其余静默丢弃"""
+        # v1.9.9.21：该用例只在「三条任务都已过期」时成立，原来依赖
+        # 跑测试的时钟（晚上跑过、早上挂）。固定到 23:00 保证复现路径。
+        import datetime as _dt
+
+        class FakeNow(_dt.datetime):
+            @classmethod
+            def now(cls):
+                return cls(2026, 11, 4, 23, 0)
+
+        # _dt 与 main.dt 是同一模块，monkeypatch 结束时自动还原
+        monkeypatch.setattr(_dt, "datetime", FakeNow)
         r = app.respond("今天8点开会，今天9点交报告，今天10点买菜")
-        assert "还有" in r, r                  # 提示还有几条
+        assert "还有" in r, r
         app.respond("确认")
         app.respond("不用")
         app.respond("确认")
         titles = [t["title"] for t in app.store.tasks]
         assert "开会" in titles and "买菜" in titles
-        assert "交报告" not in titles          # 回「不用」的那条不加
-
+        assert "交报告" not in titles
     def test_decline_expired(self, app):
         app.respond("今天8点开会")
         app.respond("不用")
@@ -719,3 +729,67 @@ class TestV19920OnboardingAndUX:
         a.refresh_tasks()
         a.root.update()
         assert a._long_titles, "长标题没有登记，悬停看不到全文"
+
+
+class TestV19921HintAndFocus:
+    """v1.9.9.21：回车提示只教一次 / 记一条有反馈"""
+
+    def _ready(self, app):
+        app.store.setup_stage = 3
+        app.store.enter_hint_done = False
+        app.refresh_tasks()
+        app.root.update()
+
+    def test_hint_removed_after_first_send(self, app):
+        """第一次成功发送后，「回车发送」永久消失，输入框回正常宽度"""
+        a = app
+        self._ready(a)
+        assert a.hint_lbl is not None, "首次使用应当显示回车发送提示"
+        a.clear_placeholder()
+        a.entry.insert(0, "买牛奶")
+        a.on_send()
+        a.root.update()
+        assert a.hint_lbl is None, "发送后提示没撤掉"
+        assert a.store.enter_hint_done
+
+    def test_hint_stays_away_after_restart(self, app, tmp_path):
+        """重启后（store 已标记）提示不再出现"""
+        a = app
+        self._ready(a)
+        a.store.enter_hint_done = True
+        a.store.save()
+        a2 = M.NoteApp(tk.Toplevel(a.root))
+        a2.root.update()
+        try:
+            assert a2.hint_lbl is None, "重启后提示又出现了"
+        finally:
+            a2.root.destroy()
+
+    def test_add_button_gives_feedback(self, app):
+        """点「记一条」：清占位符 + 高亮边框 + 浮出操作提示"""
+        a = app
+        self._ready(a)
+        a.store.tasks = []
+        a.store.save()
+        a.refresh_tasks()
+        a.root.update()
+        assert a.list_cv.find_withtag("empty_btn"), "空状态没有按钮"
+        a._focus_entry()
+        a.root.update()
+        assert not a._compose_placeholder, "占位符还在，光标像没进去"
+        assert a.entry.cget("highlightthickness") == 2, "边框没有高亮"
+        assert "输入" in a.f_hint.cget("text"), "没有浮出操作提示"
+
+    def test_flash_border_settles(self, app):
+        """高亮结束后边框恢复 1px"""
+        a = app
+        self._ready(a)
+        a._focus_entry()
+
+        def _check():
+            assert a.entry.cget("highlightthickness") == 1, "边框没恢复"
+        a.root.after(1100, _check)
+        end = __import__("time").time() + 2.0
+        while __import__("time").time() < end:
+            a.root.update()
+            __import__("time").sleep(0.05)

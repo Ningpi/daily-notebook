@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.20"
+VERSION = "1.9.9.21"
 
 
 # ----------------------------------------------------------------- 配色
@@ -162,6 +162,7 @@ class Store(object):
         self.bubble_enabled = True # 右下角「未完成任务」气泡开关
         self.bubble_w = 84         # 气泡宽度（拖拽缩放，60~160）
         self.font_scale = 1.0      # 字体缩放（0.8~1.3）
+        self.enter_hint_done = False  # 「回车发送」提示已教过（v1.9.9.21）
         self.text_darken = None    # 手动字体深浅；None=按透明度自动推导
         self.notes = []
         self.note_pos = None
@@ -216,6 +217,8 @@ class Store(object):
             # v1.8.1 起不再问助手名：停留在旧阶段 2 的直接视为完成
             if self.setup_stage >= 2:
                 self.setup_stage = 3
+            # v1.9.9.21：「回车发送」提示只需教一次，之后启动不再出现
+            self.enter_hint_done = bool(obj.get("enter_hint_done", False))
             for k in ("zh", "en"):
                 self.quotes.setdefault(k, {"last": "", "recent": []})
             saved_day = obj.get("date", self._today())
@@ -287,6 +290,7 @@ class Store(object):
             "bubble_w": int(getattr(self, "bubble_w", 84)),
             "font_scale": round(float(getattr(self, "font_scale", 1.0) or 1.0), 2),
             "text_darken": getattr(self, "text_darken", None),
+            "enter_hint_done": bool(getattr(self, "enter_hint_done", False)),
         }
         self._atomic(self.path, obj)
         # v1.9.9.20：每天首次保存做一次快照，保留最近 7 天
@@ -1497,9 +1501,14 @@ class NoteApp(object):
         self.send_btn.pack(side="left", padx=(4, 0))
         self.send_btn.bind("<Button-1>", lambda e: self.on_send())
         # v1.9.9.20：显式告诉用户回车能发，也说明输入法上屏时回车不算发送
-        self.hint_lbl = tk.Label(self.input_row, text=tr("enter_send_hint"),
-                                 bg=C.BG, fg=C.SUB, font=self.f_tiny)
-        self.hint_lbl.pack(side="left", padx=(4, 0))
+        # v1.9.9.21：只教一次——第一次成功发送后永久撤掉（_retire_enter_hint），
+        # 且重启不再出现；输入框不再被这行字挤窄
+        if not getattr(self.store, "enter_hint_done", False):
+            self.hint_lbl = tk.Label(self.input_row, text=tr("enter_send_hint"),
+                                     bg=C.BG, fg=C.SUB, font=self.f_tiny)
+            self.hint_lbl.pack(side="left", padx=(4, 0))
+        else:
+            self.hint_lbl = None
 
         # 可拖动分隔条：上下拖动调整聊天区高度
         self.splitter = tk.Frame(r, bg=C.SPLIT, height=4,
@@ -2723,11 +2732,25 @@ class NoteApp(object):
         if not text:
             return "break"
         self.entry.delete(0, "end")
+        self._retire_enter_hint()      # 第一次成功发送后撤掉「回车发送」
         if self.list_mode == "note":
             self.add_note(text)
             return "break"
         self.handle_user_text(text)
         return "break"
+
+    def _retire_enter_hint(self):
+        """「回车发送」提示只在第一次成功发送前显示，之后永久撤掉，
+        输入框回归正常宽度（v1.9.9.21）。记进 store，下次启动不再出现。"""
+        if getattr(self, "hint_lbl", None) is not None:
+            try:
+                self.hint_lbl.destroy()
+            except Exception:
+                pass
+            self.hint_lbl = None
+        if not getattr(self.store, "enter_hint_done", False):
+            self.store.enter_hint_done = True
+            self.store.save()
 
     # ---------------- 消息流
     def push(self, role, text, dual=None):
@@ -4496,10 +4519,35 @@ class NoteApp(object):
             pass
 
     def _focus_entry(self):
-        """把焦点给输入框（空状态按钮 / 托盘提示共用）"""
+        """把焦点给输入框并给出明确反馈（空状态按钮 / 托盘菜单共用）。
+
+        v1.9.9.21：原来只 focus，界面毫无变化，用户不知道刚才点了个啥。
+        现在：清掉占位符让光标落进去 + 输入框边框闪两下高亮 + 功能栏
+        浮出一句「在下面输入…回车即可记录」。"""
         try:
+            self.clear_placeholder()          # 占位符不走，光标像没进去
             self.entry.focus_force()
             self.entry.icursor("end")
+        except Exception:
+            pass
+        self.flash(tr("focus_hint"), 2600)
+        # 边框高亮闪两下：高亮色 ↔ 常规色
+        try:
+            base = C.INPUT_LINE
+
+            def _set(c, w):
+                self.entry.config(highlightbackground=c, highlightcolor=c,
+                                  highlightthickness=w)
+
+            def _back():
+                try:
+                    _set(base, 1)
+                except Exception:
+                    pass
+            _set(C.ACCENT, 2)
+            self.root.after(260, lambda: _set(base, 2))
+            self.root.after(520, lambda: _set(C.ACCENT, 2))
+            self.root.after(900, _back)
         except Exception:
             pass
 
