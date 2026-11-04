@@ -1592,3 +1592,104 @@ class TestV199927DailyList:
         d = self._daily(a, "开会", kind="weekly", weekday=other)
         a.store._roll_day(a.store._today())
         assert d["done"] is True
+
+
+class TestV199928UserAudit:
+    """v1.9.9.28：以真实用户身份重走流程发现的问题
+
+    这一批全部来自「照日常说话方式用一遍」而不是照需求文档测：
+      · 语气词被切成任务（「算了不用了」→【算了不用】）
+      · 查询句被当任务（「我今天有什么安排」→【我有什么安排】）
+      · 吐槽被当任务（「头疼」「好烦啊」）
+      · 日常任务打卡的十几种说法全都不认（只能手动点勾）
+      · 日常任务还在问「A.紧急 B.重要」（设计上根本没有优先级）
+      · 「删除健身」变成一条叫「删除健身」的任务
+      · 提醒问 E/F 时回个 A，被静默设成「提前 5 分钟」
+    """
+
+    def _fresh(self, app):
+        a = app
+        a.store.setup_stage = 3
+        a.store.tasks = []
+        a.store.save()
+        for k in ("_pending_q", "_pending_task", "_pending_expired",
+                  "_pending_remind", "_pending_dup"):
+            setattr(a, k, None)
+        return a
+
+    # ---- 语气词 / 吐槽 / 查询句
+    def test_filler_words_not_tasks(self, app):
+        a = self._fresh(app)
+        for w in ("算了不用了", "好的", "嗯", "没事", "我累了", "头疼", "好烦啊"):
+            a.respond(w)
+        assert not a.store.tasks, [t["title"] for t in a.store.tasks]
+
+    def test_query_sentences_not_tasks(self, app):
+        a = self._fresh(app)
+        for w in ("我今天有什么安排", "明天要做什么", "我一共有多少任务", "这周还有什么"):
+            a.respond(w)
+        assert not a.store.tasks, [t["title"] for t in a.store.tasks]
+
+    def test_query_with_verb_still_task(self, app):
+        """带动作动词的问句仍是任务（「明天要交什么报告」）"""
+        a = self._fresh(app)
+        a.respond("明天要交什么报告")
+        assert a.store.tasks, "该建的任务被查询过滤吞了"
+
+    # ---- 打卡的所有说法
+    def test_check_in_variants(self, app):
+        """「背单词打卡了 / 打个卡 背单词 / 今天做了背单词」都要认"""
+        for w in ("背单词打卡了", "打个卡 背单词", "今日背单词打卡", "今天做了背单词"):
+            a = self._fresh(app)
+            a.respond("每天早上八点背单词")
+            a.respond("不用")
+            before = len(a.store.tasks)
+            a.respond(w)
+            t = a.store.tasks[0]
+            assert len(a.store.tasks) == before, "%s 新建了任务" % w
+            assert t["done"] is True, "%s 没打卡：%s" % (w, [x["title"] for x in a.store.tasks])
+
+    def test_check_in_not_swallow_new_task(self, app):
+        """「买牛奶」不能被当成「买」+ 完成语"""
+        a = self._fresh(app)
+        a.respond("买牛奶")
+        assert [t["title"] for t in a.store.tasks] == ["买牛奶"]
+
+    # ---- 日常任务不问优先级
+    def test_daily_task_skips_priority(self, app):
+        a = self._fresh(app)
+        r = a.respond("每天早上八点背单词")
+        assert "优先级" not in (r or ""), r
+        assert "提醒" in (r or ""), "应该直接问提醒：" + r
+
+    # ---- 删除意图认领
+    def test_delete_by_name_not_new_task(self, app):
+        a = self._fresh(app)
+        a.respond("每天早上六点健身")
+        a.respond("不用")
+        a.respond("删除健身")
+        assert not a.store.tasks, [t["title"] for t in a.store.tasks]
+
+    def test_delete_missing_gives_feedback(self, app):
+        a = self._fresh(app)
+        r = a.respond("删除不存在的任务")
+        assert not a.store.tasks
+        assert "没找到" in (r or ""), r
+
+    # ---- 提醒选项外的字母
+    def test_unknown_letter_means_no_remind(self, app):
+        a = self._fresh(app)
+        a.respond("下午三点开会")
+        a.respond("A")          # 优先级答 A
+        a.respond("A")          # 这里问的是 E/F，A 不在选项里
+        t = a.store.tasks[0]
+        assert not t.get("remind_before"), "不该静默设成提前 5 分钟：%r" % t.get("remind_before")
+
+    # ---- 今天做了什么
+    def test_done_today_report(self, app):
+        a = self._fresh(app)
+        a.respond("每天早上八点背单词")
+        a.respond("不用")
+        a.respond("背单词打卡了")
+        r = a.respond("今天做了什么")
+        assert "背单词" in (r or ""), r

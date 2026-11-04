@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.27"
+VERSION = "1.9.9.28"
 
 
 # ----------------------------------------------------------------- 配色
@@ -3240,7 +3240,7 @@ class NoteApp(object):
         #  - 明显的新任务句（带动作动词且不是纯时间）→ 退出追问，按新任务处理
         _s = (text or "").strip()
         if re.fullmatch(r"(?:确认|确定|好的?|可以|行|嗯+|哦+|取消|算了|不用了?|"
-                        r"ok|okay|yes|no|算了)[\s。.！!～~]*", _s, re.I):
+                        r"ok|okay|yes|no)[\s。.！!～~]*", _s, re.I):
             self._pending_task = None
             if getattr(self, "_pending_q", None) == "pri":
                 self._pending_q = None
@@ -3824,6 +3824,12 @@ class NoteApp(object):
                                 r"(你|您)(认为|觉得|看)", _raw))
         need_pri = not pz.has_priority_signal(_raw) and not _echo
         need_dl = not task.get("hhmm")
+        # v1.9.9.28：日常任务（每天/每周X）**不问优先级**。
+        # 设计上日常任务本来就不参与优先级排序（列表里青色统一样式），
+        # 再问一句「A.紧急 B.重要」既自相矛盾又徒增一次追问——
+        # 用户建一条「每天背单词」要连答三次才能安心，成本太高。
+        if self._is_daily(task):
+            need_pri = False
         if _re.search(r"(?<![A-Za-z])[ABCD](?![A-Za-z])", _raw, _re.I):
             need_pri = False     # 用户已用字母表态
         # 「晚上八点提醒我…」= 用户指定了一个时刻，本身就够明确了，
@@ -4336,6 +4342,14 @@ class NoteApp(object):
                     # 字母归属随「剩余时长裁剪」动态变化（v1.9.5），按映射取
                     lmap = getattr(self, "_remind_letter_map", None) \
                         or {"A": 5, "B": 15, "C": 30, "D": 60}
+                    # v1.9.9.28：敲了选项表里没有的字母（这里问的是 E/F，
+                    # 用户还按上一问的习惯回了个 A）→ 当作跳过，不设提醒。
+                    # 原来会掉进最后的 else 静默设成「提前 5 分钟」，
+                    # 用户完全不知道给自己设了个提醒。
+                    if tok and tok not in lmap and tok != "F":
+                        task["remind_before"] = 0
+                        self.store.save()
+                        return tr("remind_off", t=task["title"])
                     if tok in lmap and lmap[tok]:
                         mins = lmap[tok]
                     elif tok in lmap:          # 选到了「不用提醒」
@@ -4402,6 +4416,20 @@ class NoteApp(object):
         if self._is_list_query(text):
             return self._list_report()
 
+        # v1.9.9.28：问「今天做了什么」→ 播报今天勾掉的任务。
+        # 原来这句会被建成一条叫「做了什么」的任务。
+        if re.fullmatch(r"[\s，,]*(?:今天|今日)(?:都)?(?:做了|干了|完成了|做完|搞定了?)"
+                        r"(?:些)?(?:什么|啥|哪些)(?:事|活|活儿|任务)?(?:呢|吗|？|\?)?"
+                        r"[\s。.！!～~]*", text or ""):
+            rows = [r for r in (self.store.history.get(self.store._today()) or [])
+                    if r.get("done")]
+            if not rows:
+                return tr("done_today_none")
+            lines = "\n".join("  · %s%s" % (r.get("title") or "",
+                                            (" " + r["at"]) if r.get("at") else "")
+                              for r in rows[:8])
+            return tr("done_today_report", n=len(rows), lines=lines)
+
         # 查询进度
         if pz.QUERY_RE.search(text) and not parsed_now:
             left = [x for x in self.store.tasks if not x.get("done")]
@@ -4414,7 +4442,13 @@ class NoteApp(object):
         # 支持：「完成/完成了/做完/做完了/搞定/搞定了/做好 + 任务名」
         #       「任务名 + 完成了/做完了/搞定了」
         #       「完成第一个 / 做完了第二条」（按未完成列表序号）
-        if pz.DONE_RE.search(text) and len(text) <= 24:
+        # v1.9.9.28：加入「XX 打卡了」「做了 XX」等日常口语完成式。
+        # 这类口语式**必须先匹配上已有任务**才当完成，否则（「买牛奶」
+        # 被看成「买」+「牛奶」）会把新建任务吞掉——所以先查再决定。
+        _soft_done = bool(re.search(r"(打个?卡|打卡|签到|签个到)", text or "")) or \
+            bool(re.match(r"^[\s，,]*(?:我)?(?:今天|刚刚|已经)?\s*"
+                          r"(?:做|弄|搞|看|读|背|学|练|写|听|跑)(?:了|过|完)", text or ""))
+        if (pz.DONE_RE.search(text) or _soft_done) and len(text) <= 24:
             done_title = self._done_target(text, parsed_now, pz)
             # v1.9.9.25：序号形式优先（「完成第一个」「做完了第二条」），
             # 否则会被当成叫「第二条」的任务名
@@ -4424,17 +4458,26 @@ class NoteApp(object):
                 if idx_title is not None:
                     return idx_title
             if done_title is None:
-                return tr("done_notfound", title=(text or "").strip())
-            for task in self.store.tasks:
-                if self._match(done_title, task["title"]):
-                    if not task.get("done"):
-                        task["done"] = True
-                        task["done_at"] = dt.datetime.now().strftime("%H:%M")
-                        self.store.save()
-                        self.store.sync_history()
-                        self.refresh_tasks()
-                        return self._praise(tr("done_ok", title=task["title"]))
-            return tr("done_notfound", title=done_title)
+                if not _soft_done or pz.DONE_RE.search(text):
+                    return tr("done_notfound", title=(text or "").strip())
+            else:
+                for task in self.store.tasks:
+                    if self._match(done_title, task["title"]):
+                        if not task.get("done"):
+                            if self._is_daily(task):
+                                # 日常任务：勾的是「今天打卡」，不是「这件事完了」
+                                now_done, streak = self._daily_toggle(task)
+                                self.store.save()
+                                self.refresh_tasks()
+                                return tr("daily_checked", t=task["title"])
+                            task["done"] = True
+                            task["done_at"] = dt.datetime.now().strftime("%H:%M")
+                            self.store.save()
+                            self.store.sync_history()
+                            self.refresh_tasks()
+                            return self._praise(tr("done_ok", title=task["title"]))
+                if pz.DONE_RE.search(text):
+                    return tr("done_notfound", title=done_title)
 
         # 改时间意图（v1.9.9.25）：「把开会改到下午4点」「开会改成明天3点」
         m_adj = re.match(r"^[\s，,]*(?:帮我|请)?(?:把|将)?\s*(.+?)\s*"
@@ -4463,10 +4506,16 @@ class NoteApp(object):
 
         # 删除意图
         # v1.9.9.25：补「取消写周报 / 不要写周报了」以及「删除第二个任务」
-        _cancel = re.match(r"^[\s，,]*(?:帮我|请)?(?:取消|不要了?|不做了?|别做)"
+        # v1.9.9.28：「删除健身」「删掉那个跑步」「把健身删了」原来全都
+        # 落到新任务分支，变成一条叫「删除健身」的任务。现在统一在
+        # 这里认领——删不掉时明确说没找到，绝不新建。
+        _cancel = re.match(r"^[\s，,]*(?:帮我|请)?(?:取消|不要了?|不做了?|别做|"
+                           r"删掉|删了|删除|删|去掉|移除|干掉)"
                            r"(?:掉|了)?\s*(.+?)(?:了|吧|啦)?\s*[。.！!～~]*$",
                            (text or "").strip())
-        if _cancel and len(text) <= 20:
+        if _cancel and len(text) <= 20 and not re.search(
+                r"第\s*(?:[0-9]+|[一二三四五六七八九十]{1,3})\s*[个条项件]",
+                text or ""):
             _nm = _cancel.group(1).strip()
             if _nm and _nm not in ("任务", "待办"):
                 for i, task in enumerate(list(self.store.tasks)):
@@ -4478,6 +4527,10 @@ class NoteApp(object):
                         self.store.save()
                         self.refresh_tasks()
                         return tr("deleted", title=task["title"])
+                # 删不掉也要有回应，别掉进「新建任务」
+                if re.match(r"^[\s，,]*(?:删掉|删了|删除|删|去掉|移除|干掉)",
+                            (text or "").strip()):
+                    return tr("done_notfound", title=_nm)
         _del_idx = re.match(r"^[\s，,]*(?:删|删除|去掉|删掉)\s*第\s*"
                             r"([0-9]+|[一二三四五六七八九十]{1,3})\s*[个条项件]?"
                             r"(?:任务|待办|的)?\s*$", (text or "").strip())
@@ -5303,6 +5356,21 @@ class NoteApp(object):
         import re as _re
         t = (text or "").strip()
         DONE = r"(?:已经)?(?:完成|做完|搞定|做好|干完|弄好|结束)(?:了)?"
+        # ⓪ v1.9.9.28：打卡句式必须先判——「打个卡 背单词」里的「打个卡」
+        # 会被 ②（后置完成式）当成标题尾巴的一部分，标题就变成「打个卡」。
+        m = _re.match(r"^[\s，,]*(?:今天|今日|刚刚|已经)?\s*"
+                      r"(?:打个?卡|打一下卡|打卡|签个到|签到)\s*[：:，,、]?\s*(.+?)"
+                      r"\s*[。.！!～~]*$", t)
+        if m:
+            cand = m.group(1).strip(" 的了，,。.！!？?")
+            if cand and len(cand) <= 20:
+                return cand
+        m = _re.match(r"^[\s，,]*(?:今天|今日|刚刚|已经)?\s*(.+?)\s*"
+                      r"(?:打卡|打了卡|签个到|签到)(?:了|啦|喽)?\s*[。.！!～~]*$", t)
+        if m:
+            cand = m.group(1).strip(" 的了，,。.！!？?")
+            if cand and len(cand) <= 20:
+                return cand
         # ① 前置：「完成/做完了 XX」
         m = _re.match(r"^[\s，,]*(?:我)?(?:已经)?(?:把)?(?:完成|做完|搞定|做好|干完|弄好)"
                       r"(?:了|掉)?\s*[，,]?\s*(.+)$", t)
@@ -5317,6 +5385,16 @@ class NoteApp(object):
             cand = m.group(1).strip(" 的了，,。.！!？?")
             cand = _re.sub(r"^(?:我|把|将)\s*", "", cand)
             if cand and not _re.fullmatch(r"[第\d一二三四五六七八九十]+[个条项]?", cand):
+                return cand
+        # ②c v1.9.9.28：「做了背单词 / 看了两章书 / 学了英语」——
+        # 动词 + 宾语的口语完成式。只在**已有任务能匹配上**时才用它
+        # （调用方会再核对一次），避免把「买牛奶」这种新活误判成完成。
+        m = _re.match(r"^[\s，,]*(?:我)?(?:今天|刚刚|已经)?\s*"
+                      r"(?:做|弄|搞|看|读|背|学|练|写|听|跑)(?:了|过|完)\s*(.+?)"
+                      r"\s*[。.！!～~]*$", t)
+        if m:
+            cand = m.group(1).strip(" 的了，,。.！!？?")
+            if cand and len(cand) <= 20:
                 return cand
         # ③ 序号形式（「完成第一个」）：交给调用方的序号分支
         if _re.fullmatch(r"[\s，,]*(?:完成|做完|搞定|做好|干完|弄好|删|删除|删掉)?\s*"
@@ -5367,14 +5445,18 @@ class NoteApp(object):
         t = (text or "").strip()
         if len(t) > 16:
             return False
-        if _re.fullmatch(r"[\s，,]*(?:我的|所有|全部|今天的?|当前的?)?"
+        # v1.9.9.28：这里的 `[\s，,]*` 前缀让「打个卡 背单词」也命中
+        # （「打个卡」被当成前导空白外的任意内容）→ 一句打卡被当成查列表。
+        # 改成先剥掉首尾标点空白，再整句精确匹配。
+        t2 = _re.sub(r"^[\s，,]+|[\s，,。.！!～~？?]+$", "", t)
+        if _re.fullmatch(r"(?:我的|所有|全部|今天的?|当前的?)?"
                          r"(?:任务|待办|列表|清单|todo|list)(?:列表|清单)?"
-                         r"(?:呢|吗|？|\?)?[\s。.！!～~]*", t, _re.I):
+                         r"(?:呢|吗|？|\?)?", t2, _re.I):
             return True
         return bool(_re.fullmatch(
-            r"[\s，,]*(?:今天|现在|当前)?(?:我)?(?:还)?(?:有|剩下?)"
+            r"(?:今天|现在|当前)?(?:我)?(?:还)?(?:有|剩下?)"
             r"(?:什么|哪些|几个|多少)(?:任务|待办|事|活儿|没做的?|没完成的?)"
-            r"(?:呢|吗|？|\?)?[\s。.！!～~]*", t))
+            r"(?:呢|吗|？|\?)?", t2))
 
     def _list_report(self):
         """播报未完成任务（按分数排序，最多 5 条）"""

@@ -323,6 +323,10 @@ STRINGS = {
     "list_report": ("现在有 {n} 件没做：\n{lines}{more}",
                     "You have {n} open task(s):\n{lines}{more}"),
     "list_more": ("\n  …还有 {n} 件", "\n  …and {n} more"),
+    # v1.9.9.28：对话里问「今天做了什么」
+    "done_today_report": ("今天完成了 {n} 件：\n{lines}", "Done today ({n}):\n{lines}"),
+    "done_today_none": ("今天还没有勾掉的任务。想看看每天的习惯，可以说「我的任务」。",
+                        "Nothing checked off today yet."),
     # v1.9.9.23：任何时候改昵称（跳过取名后也能补）
     "user_name_changed": ("好，以后就叫你{name}了（原来叫{old}）。",
                           "Okay, I'll call you {name} from now on (was {old})."),
