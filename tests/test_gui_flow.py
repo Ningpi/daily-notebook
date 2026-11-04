@@ -330,18 +330,16 @@ class TestUndoSemantics:
         assert "截止时间" in r, r
 
     def test_undo_without_deadline_does_not_lie(self, app):
-        """任务本来没有截止时间，不能谎称「已撤掉截止时间」
+        """不能谎称「已撤掉截止时间」
 
-        当前实现是「认不出可撤的东西 → 回 undo_none」，比编一句
-        「已撤掉截止时间」诚实；关键断言是任务不能被删、话术不能造假。
-        """
+        v1.9.9.24：pri 待答中说撤回 = 把这条刚建的任务撤掉（新语义）。
+        关键断言：话术不能造假说撤了时间。"""
         say(app, "开会")
         tid = app.store.tasks[0]["id"]
         app._undo_last = {"kind": "deadline", "id": tid}
         r = app.respond("撤回")
         assert "截止时间撤掉" not in r, r          # 不许谎称撤掉了时间
-        assert len(app.store.tasks) == 1           # 任务必须留着
-        assert app.store.tasks[0]["id"] == tid
+        assert not app.store.tasks, "pri 待答中撤回应连任务一起撤掉"
 
     def test_undo_with_nothing_to_undo(self, app):
         """什么都没做时说撤回，要给提示，不能建出叫「撤回」的任务"""
@@ -874,23 +872,17 @@ class TestV19922Undo:
         assert not a.store.tasks, "第3步：任务没撤掉"
 
     def test_undo_cancels_pending_flow_first(self, app):
-        """正在等优先级/时间确认时说撤回 → 只取消流程，不动任务与栈"""
+        """正在等优先级确认时说撤回 = 这条刚建的别记了：任务一并撤掉
+        （v1.9.9.24 实测：只取消流程、任务留着会让用户困惑）"""
         a = self._clean(app)
         a.respond("明天交报告")
-        # 走到追问环节
         if not a._pending_task:
-            a.store.tasks[0]["hhmm"] = None
             a._pending_task = {"id": a.store.tasks[0]["id"],
                                "need_pri": True, "need_dl": True}
             a._pending_q = "pri"
-        tid = a.store.tasks[0]["id"]
         r = a.respond("撤回")
-        assert a.store.tasks and a.store.tasks[0]["id"] == tid, \
-            "撤回把原任务删了"
         assert a._pending_q is None and a._pending_task is None, "流程没取消"
-        # 撤回栈仍在：再撤一次应能撤掉任务本身
-        r2 = a.respond("撤回任务")
-        assert not a.store.tasks, "第二次撤回没生效"
+        assert not a.store.tasks, "刚建的待配置任务没被撤掉：%s" % r
 
     def test_undo_no_stack_text(self, app):
         """没有可撤回内容时，提示不再教用户「撤回再报新时间」"""
@@ -1099,8 +1091,8 @@ class TestV199923NameAndTray:
         a.respond("你就叫小宁同志吧")
         assert a.store.bot_name == "小宁同志"
 
-    def test_close_waits_for_tray(self, app):
-        """点 ✕ 时托盘还在初始化 → 等待而不是直接退出"""
+    def test_close_never_quits(self, app):
+        """v1.9.9.24：点 ✕ 一律只藏窗口，任何情况下都不退出进程"""
         a = app
         a.store.setup_stage = 3
 
@@ -1109,13 +1101,15 @@ class TestV199923NameAndTray:
             def notify(self, *x): pass
             def update_tip(self, *x): pass
 
+        # 托盘初始化中
         a._tray = FakeTray()
         a._tray_failed = False
         a._tray_wait_deadline = None
         quit_called = []
         a.quit = lambda: quit_called.append(1)
         a.close_or_hide()
-        assert not quit_called, "托盘初始化中就把进程退了（Bug 2）"
+        assert not quit_called, "托盘初始化中就退出了进程"
+        assert a._tray_hidden, "窗口没有藏起来"
 
     def test_close_hides_when_tray_ready(self, app):
         """托盘就绪后点 ✕ = 隐藏，不退出"""
@@ -1134,19 +1128,18 @@ class TestV199923NameAndTray:
         assert not quit_called
         assert a._tray_hidden
 
-    def test_close_quits_when_tray_unavailable(self, app):
-        """托盘确实不可用（已过宽限期）→ 退出，不无限挂住"""
-        import time as _t
+    def test_close_hides_even_without_tray(self, app):
+        """v1.9.9.24：托盘完全不可用也只藏窗口不退出（重新双击应用
+        图标可由单实例探针唤回窗口）"""
         a = app
         a.store.setup_stage = 3
         a._tray = None
         a._tray_failed = True
-        a._tray_wait_deadline = _t.time() - 1
         quit_called = []
         a.quit = lambda: quit_called.append(1)
-        a._tray_wait_deadline = _t.time() - 1
         a.close_or_hide()
-        assert quit_called, "托盘不可用时点 ✕ 没退出"
+        assert not quit_called, "托盘不可用时还是退出了进程"
+        assert a._tray_hidden
 
     def test_taskish_english(self, app):
         """_taskish 认英文任务句（避免被当昵称）"""

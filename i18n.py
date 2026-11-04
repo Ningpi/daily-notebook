@@ -290,6 +290,10 @@ STRINGS = {
     # v1.9.9.23：托盘真的不可用（非 Windows / 初始化失败）时点 ✕ 的交代
     "tray_unavailable": ("系统托盘不可用，已退出。下次打开继续记。",
                          "System tray is unavailable here, so the app exited."),
+    # v1.9.9.24：✕ 一律只藏窗口（托盘不可用时也没有托盘菜单，靠
+    # 重新双击应用图标唤回窗口）
+    "tray_hidden_fallback": ("已收进后台，提醒照常。重新打开本应用或点托盘图标可回到窗口。",
+                             "Minimized — reminders still run. Reopen the app to get the window back."),
     "export_btn": ("导出", "Export"),
     "export_json": ("导出 JSON（完整备份）", "Export JSON (full backup)"),
     "export_md": ("导出 Markdown（可读归档）", "Export Markdown (readable)"),

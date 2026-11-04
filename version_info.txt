@@ -17,12 +17,12 @@ VSVersionInfo(
       StringTable('080404B0', [
         StringStruct('CompanyName', 'DailyNote'),
         StringStruct('FileDescription', '每日记事本 —— 聊天式待办便签'),
-        StringStruct('FileVersion', '1.9.9.23.0'),
+        StringStruct('FileVersion', '1.9.9.24.0'),
         StringStruct('InternalName', 'DailyNote'),
         StringStruct('LegalCopyright', '© 2026 DailyNote'),
         StringStruct('OriginalFilename', '每日记事本.exe'),
         StringStruct('ProductName', '每日记事本'),
-        StringStruct('ProductVersion', '1.9.9.23.0'),
+        StringStruct('ProductVersion', '1.9.9.24.0'),
       ])
     ]),
     VarFileInfo([VarStruct('Translation', [2052, 1200])]),

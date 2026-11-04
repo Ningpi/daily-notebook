@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.23"
+VERSION = "1.9.9.24"
 
 
 # ----------------------------------------------------------------- 配色
@@ -3910,15 +3910,14 @@ class NoteApp(object):
         t = (text or "").strip()
         if not t or len(t) > 20:
             return None
-        # ① 待确认流程中：光秃秃的「撤回」= 取消当前问答/确认
-        #    （P0 问题3：绝不去删原来的任务）。但明确点名「任务/待办」
-        #    且当前问答是针对**刚建的这条任务**（pri/remind）时，
-        #    「撤回任务」仍然删掉它——这是文档承诺的行为；
-        #    dup/expired/meridiem 涉及的是老任务或尚未入库的任务，
-        #    一律只取消流程。
+        # ① 待确认流程中：撤回意图的处理分两种（v1.9.9.24 实测调整）：
+        #    - _pending_q == "pri"：这是**刚建的这条新任务**在等配置，
+        #      用户说「撤回一下 / 说错了」就是「这条别记了」——连任务
+        #      一起撤掉（原实现只取消流程、任务留着，实测很困惑）；
+        #    - dup/expired/meridiem/remind：涉及的是老任务或尚未入库的
+        #      任务，一律只取消当前问答，绝不动已有数据。
         if getattr(self, "_pending_q", None) and self._undo_intent().match(t):
-            if _re.search(r"(任务|待办|事项|条目)", t) \
-                    and self._pending_q in ("pri", "remind"):
+            if self._pending_q == "pri":
                 return "task"
             return "cancel"
         # ② 「撤回任务」「撤回待办」「撤回上一条」= 撤整个任务
@@ -4871,40 +4870,28 @@ class NoteApp(object):
         return bool(getattr(self, "_tray", None) and self._tray.available)
 
     def close_or_hide(self):
-        """✕：藏进托盘（提醒继续跑）。
+        """✕：一律藏进后台，进程永不因关窗退出（v1.9.9.24，用户明确要求）。
 
-        Bug 2（v1.9.9.23）：原来托盘没就绪就直接 quit()，而托盘初始化
-        是在启动 800ms 后才开始的异步线程——用户在这个窗口期点 ✕，
-        进程就真退出了（「第一次点×直接退出，后来又好了」）。
-        现在给托盘最多 2 秒宽限期，期间每 100ms 重试；只有确认托盘
-        确实不可用（非 Windows / 初始化失败 / 超时）才退出。"""
-        import time as _tm
+        提醒靠 root 的 after 循环继续跑，窗口藏起后照常弹提醒/气泡。
+        退出的唯一入口是托盘菜单的「退出」。托盘还没就绪时也先藏
+        （图标随后会出现）；托盘彻底不可用（非 Windows/初始化失败）
+        时同样只藏不退——此时用户重新双击应用图标，单实例探针会把
+        窗口拉回来，不会出现「窗口藏了找不回」的死局。"""
         if self._tray_ok():
             self.hide_to_tray()
             return
-        # 首次点 ✕ 时开始计时
-        deadline = getattr(self, "_tray_wait_deadline", None)
-        if deadline is None:
-            self._tray_wait_deadline = _tm.time() + 2.0
-            deadline = self._tray_wait_deadline
-        t = getattr(self, "_tray", None)
-        # 托盘对象已存在但还没 ready → 它还在初始化；或还没创建（启动中）
-        pending = (t is not None and not t.available) or \
-                  (t is None and not getattr(self, "_tray_failed", False))
-        if pending and _tm.time() < deadline:
-            try:
-                self.root.after(100, self.close_or_hide)
-            except Exception:
-                self.quit()
-            return
-        # 宽限期过了仍不可用：说明托盘真的用不了，明确告知后退出
-        self._tray_wait_deadline = None
-        if not self._tray_ok() and getattr(self, "_tray_failed", False):
-            try:
-                self.flash(tr("tray_unavailable"))
-            except Exception:
-                pass
-        self.quit()
+        # 托盘未就绪/不可用：仍然只藏窗口。延迟一点再提示托盘状态，
+        # 避免 flash 在窗口已隐藏时白白执行。
+        try:
+            self.root.after(300, lambda: self.flash(tr("tray_hidden_fallback"))
+                            if not self._tray_hidden else None)
+        except Exception:
+            pass
+        try:
+            self.root.withdraw()
+        except Exception:
+            pass
+        self._tray_hidden = True
 
     def hide_to_tray(self):
         """藏到托盘：窗口消失，进程和定时器都留着，提醒照常弹"""
