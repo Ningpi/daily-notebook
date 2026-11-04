@@ -1039,3 +1039,138 @@ class TestV19922Undo:
         assert a._undo_last and a._undo_last["kind"] == "delete", "删除没有撤回记录"
         r = a.respond("撤回")
         assert a.store.tasks and a.store.tasks[0]["id"] == tid, "删除没被撤回"
+
+
+class TestV199923NameAndTray:
+    """v1.9.9.23：改昵称入口 / 托盘启动窗口期点 ✕ / 助手名误匹配"""
+
+    def _boot(self, app):
+        a = app
+        a.store.setup_stage = 0
+        a.store.user_name = ""
+        a.store.bot_name = ""
+        a.store.tasks = []
+        a.store.save()
+        return a
+
+    def test_set_name_after_skipping(self, app):
+        """引导阶段跳过取名后，「你叫我boss吧」能补设昵称而不是建任务"""
+        a = self._boot(app)
+        a.respond("你好")
+        a.respond("数学作业")            # 任务句 → 跳过取名
+        assert a.store.setup_stage == 3
+        n_before = len(a.store.tasks)
+        r = a.respond("你叫我boss吧")
+        assert a.store.user_name == "boss", "昵称没设上：" + str(r)
+        assert len(a.store.tasks) == n_before, "被当成新任务建出来了"
+        assert "你叫我boss" not in " ".join(t["title"] for t in a.store.tasks)
+
+    def test_set_name_variants(self, app):
+        """以后叫我X / 我叫X / 设置我的名字是X 都识别"""
+        a = self._boot(app)
+        a.respond("你好"); a.respond("跳过")
+        for phrase, want in (("以后叫我Alex", "Alex"),
+                             ("我叫小李", "小李"),
+                             ("设置我的名字是小王", "小王"),
+                             ("我的名字是老王", "老王")):
+            a.respond(phrase)
+            assert a.store.user_name == want, phrase + " → " + str(a.store.user_name)
+
+    def test_set_name_not_read_as_task(self, app):
+        """改昵称的句子永远不进待办列表"""
+        a = self._boot(app)
+        a.respond("你好"); a.respond("跳过")
+        a.store.tasks = []
+        a.respond("叫我小陈")
+        assert not a.store.tasks, "改昵称被建成了任务"
+
+    def test_bot_name_regex_anchored(self, app):
+        """「小王叫小张帮他买东西」不能把「小张」当助手名"""
+        a = self._boot(app)
+        a.respond("你好"); a.respond("跳过")
+        a.store.bot_name = "小宁"
+        a.respond("小王叫小张帮他买东西")
+        assert a.store.bot_name == "小宁", "助手名被误改：" + str(a.store.bot_name)
+
+    def test_bot_name_still_works(self, app):
+        """正常给助手起名不受影响"""
+        a = self._boot(app)
+        a.respond("你好"); a.respond("跳过")
+        a.respond("你就叫小宁同志吧")
+        assert a.store.bot_name == "小宁同志"
+
+    def test_close_waits_for_tray(self, app):
+        """点 ✕ 时托盘还在初始化 → 等待而不是直接退出"""
+        a = app
+        a.store.setup_stage = 3
+
+        class FakeTray:
+            available = False
+            def notify(self, *x): pass
+            def update_tip(self, *x): pass
+
+        a._tray = FakeTray()
+        a._tray_failed = False
+        a._tray_wait_deadline = None
+        quit_called = []
+        a.quit = lambda: quit_called.append(1)
+        a.close_or_hide()
+        assert not quit_called, "托盘初始化中就把进程退了（Bug 2）"
+
+    def test_close_hides_when_tray_ready(self, app):
+        """托盘就绪后点 ✕ = 隐藏，不退出"""
+        a = app
+        a.store.setup_stage = 3
+
+        class FakeTray:
+            available = True
+            def notify(self, *x): pass
+            def update_tip(self, *x): pass
+
+        a._tray = FakeTray()
+        quit_called = []
+        a.quit = lambda: quit_called.append(1)
+        a.close_or_hide()
+        assert not quit_called
+        assert a._tray_hidden
+
+    def test_close_quits_when_tray_unavailable(self, app):
+        """托盘确实不可用（已过宽限期）→ 退出，不无限挂住"""
+        import time as _t
+        a = app
+        a.store.setup_stage = 3
+        a._tray = None
+        a._tray_failed = True
+        a._tray_wait_deadline = _t.time() - 1
+        quit_called = []
+        a.quit = lambda: quit_called.append(1)
+        a._tray_wait_deadline = _t.time() - 1
+        a.close_or_hide()
+        assert quit_called, "托盘不可用时点 ✕ 没退出"
+
+    def test_taskish_english(self, app):
+        """_taskish 认英文任务句（避免被当昵称）"""
+        assert app._taskish("Mathematics homework")
+        assert app._taskish("buy milk tomorrow")
+        assert not app._taskish("Alex")
+
+    def test_name_phrases_never_tasks(self, app):
+        """自称/称呼句一律不建任务（Bug 3 边界）"""
+        a = self._boot(app)
+        a.respond("你好"); a.respond("跳过")
+        a.store.tasks = []
+        for s in ("你叫我boss吧", "以后叫我Alex", "我叫小李",
+                  "我的名字是老王", "你就叫我阿杰"):
+            a.respond(s)
+        assert not a.store.tasks, "称呼句被建成了任务：" + str(
+            [t["title"] for t in a.store.tasks])
+
+    def test_plain_short_tasks_still_work(self, app):
+        """普通短任务不受影响（不误伤识别率）"""
+        a = self._boot(app)
+        a.respond("你好"); a.respond("跳过")
+        a.store.tasks = []
+        a.respond("买牛奶")
+        a.respond("交作业")
+        titles = [t["title"] for t in a.store.tasks]
+        assert "买牛奶" in titles and "交作业" in titles, titles

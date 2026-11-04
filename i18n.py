@@ -287,6 +287,9 @@ STRINGS = {
                        "Still watching your reminders. Click the icon to open."),
     "tray_show": ("显示主窗口", "Show window"),
     "tray_quit": ("退出", "Quit"),
+    # v1.9.9.23：托盘真的不可用（非 Windows / 初始化失败）时点 ✕ 的交代
+    "tray_unavailable": ("系统托盘不可用，已退出。下次打开继续记。",
+                         "System tray is unavailable here, so the app exited."),
     "export_btn": ("导出", "Export"),
     "export_json": ("导出 JSON（完整备份）", "Export JSON (full backup)"),
     "export_md": ("导出 Markdown（可读归档）", "Export Markdown (readable)"),
@@ -306,6 +309,9 @@ STRINGS = {
     "ask_user_name_again": ("没太听清，你希望我怎么称呼您呢？直接说名字就行，比如「小李」",
                             "I didn't catch that. What should I call you? Just the name, e.g. \"Alex\""),
     "name_ok": ("{name}，记住了。", "Got it, {name}."),
+    # v1.9.9.23：任何时候改昵称（跳过取名后也能补）
+    "user_name_changed": ("好，以后就叫你{name}了（原来叫{old}）。",
+                          "Okay, I'll call you {name} from now on (was {old})."),
     "usage_guide": (
         "重点功能：\n"
         "· 「撤回」撤销上一步操作：建错任务、设错截止时间、设错提醒时间均可撤，撤后可重新输入\n"

@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.22"
+VERSION = "1.9.9.23"
 
 
 # ----------------------------------------------------------------- 配色
@@ -448,8 +448,18 @@ def round_rect(cv, x1, y1, x2, y2, r=8, **kw):
 # ----------------------------------------------------------------- 主题图标
 # 「给助手起名」：你叫X / 我希望你叫X / 你就叫X / 以后就叫你X
 # 不匹配「你以后叫我…」（那是在说自己昵称）
+# v1.9.9.23：锚定句首/句尾，避免「小王叫小张帮他买东西」把「小张」当助手名
 _BOT_NAME_RE = re.compile(
-    r"(?:你|您)(?:以后|就|都|要|希望|得)?(?:就)?叫(?!我|自己|什么|啥)([^，,。.!！?？\s]{1,8})")
+    r"^[\s，,]*(?:你|您)(?:以后|就|都|要|希望|得)?(?:就)?叫(?!我|自己|什么|啥)"
+    r"([^，,。.!！?？\s]{1,8})\s*[吧哦呀啊啦哈。.！!～~]*\s*$")
+
+# v1.9.9.23：用户随时改自己的昵称——「你叫我boss吧 / 以后叫我Alex /
+# 我叫小李 / 我的名字是老王 / 设置我的名字是小李」
+_USER_NAME_RE = re.compile(
+    r"^[\s，,]*(?:(?:你|您)(?:以后|就|都|要|希望|得)?(?:就)?叫我|"
+    r"以后叫我|以后就叫我|就叫我|叫我|我叫|我的名字是|我的名字叫|"
+    r"设置我的名字是|设置我的昵称是|改名叫)\s*([^，,。.!！?？\s]{1,12}?)\s*"
+    r"[吧哦呀啊啦哈。.！!～~]*\s*$")
 
 
 class IconCache(object):
@@ -1043,6 +1053,10 @@ class NoteApp(object):
         self._unbind_alpha_away = lambda: None
         self._due_cards = []       # 右下角截止提醒卡片
         self._tray = None          # 系统托盘（v1.9.9.20，Windows 才可用）
+        # v1.9.9.23：托盘确定不可用（非 Windows / 初始化失败）才允许 ✕ 直接退出；
+        # 启动窗口期内点 ✕ 先等托盘就绪（Bug 2）
+        self._tray_failed = False
+        self._tray_wait_deadline = None
         self._tray_hidden = False
         self._long_titles = {}     # 本屏被截断的标题 → 全文（悬停提示）
         self._title_tip = None
@@ -3741,6 +3755,14 @@ class NoteApp(object):
                      r"开会|报告|作业|周报|邮件|分钟|小时|点|号|周|明天|后天|今天|"
                      r"每天|周末|之前|前)", s or ""):
             return True
+        # v1.9.9.23：英文用户同样适用（原来只认中文，英文任务句会被
+        # 当成昵称或直接放行）
+        if _r.search(r"\b(homework|report|meeting|email|mail|buy|finish|submit|"
+                     r"send|call|prepare|clean|todo|task|tomorrow|today|"
+                     r"tonight|monday|tuesday|wednesday|thursday|friday|"
+                     r"saturday|sunday|minutes?|hours?|o'?clock)\b",
+                     s or "", _r.I):
+            return True
         return False
 
     def _onboarding(self, text):
@@ -4091,6 +4113,20 @@ class NoteApp(object):
                 self.store.bot_name = nm
                 self.store.save()
                 return tr("bot_name_ok", bot=nm)
+
+        # ②b2 改自己的昵称（v1.9.9.23）：引导阶段跳过取名后，任何时候
+        # 都能补设——「你叫我boss吧 / 以后叫我Alex / 我叫小李 /
+        # 我的名字是老王」。原来这类句子一律被当成新任务建出来。
+        m_un = _USER_NAME_RE.match((text or "").strip())
+        if m_un:
+            nm = (m_un.group(1) or "").strip().strip("\"'“”‘’「」")
+            if nm and nm not in ("我", "自己", "什么", "啥", "谁"):
+                old = getattr(self.store, "user_name", "") or ""
+                self.store.user_name = nm
+                self.store.save()
+                if old and old != nm:
+                    return tr("user_name_changed", old=old, name=nm)
+                return tr("name_ok", name=nm)
 
         # ②c 撤回（v1.9.5）：元指令，优先级最高——必须早于所有追问路由，
         #     否则「撤回」会被当成上一个问题的回答吃掉
@@ -4835,11 +4871,40 @@ class NoteApp(object):
         return bool(getattr(self, "_tray", None) and self._tray.available)
 
     def close_or_hide(self):
-        """✕：托盘可用时藏进托盘（提醒继续跑），否则直接退出"""
+        """✕：藏进托盘（提醒继续跑）。
+
+        Bug 2（v1.9.9.23）：原来托盘没就绪就直接 quit()，而托盘初始化
+        是在启动 800ms 后才开始的异步线程——用户在这个窗口期点 ✕，
+        进程就真退出了（「第一次点×直接退出，后来又好了」）。
+        现在给托盘最多 2 秒宽限期，期间每 100ms 重试；只有确认托盘
+        确实不可用（非 Windows / 初始化失败 / 超时）才退出。"""
+        import time as _tm
         if self._tray_ok():
             self.hide_to_tray()
-        else:
-            self.quit()
+            return
+        # 首次点 ✕ 时开始计时
+        deadline = getattr(self, "_tray_wait_deadline", None)
+        if deadline is None:
+            self._tray_wait_deadline = _tm.time() + 2.0
+            deadline = self._tray_wait_deadline
+        t = getattr(self, "_tray", None)
+        # 托盘对象已存在但还没 ready → 它还在初始化；或还没创建（启动中）
+        pending = (t is not None and not t.available) or \
+                  (t is None and not getattr(self, "_tray_failed", False))
+        if pending and _tm.time() < deadline:
+            try:
+                self.root.after(100, self.close_or_hide)
+            except Exception:
+                self.quit()
+            return
+        # 宽限期过了仍不可用：说明托盘真的用不了，明确告知后退出
+        self._tray_wait_deadline = None
+        if not self._tray_ok() and getattr(self, "_tray_failed", False):
+            try:
+                self.flash(tr("tray_unavailable"))
+            except Exception:
+                pass
+        self.quit()
 
     def hide_to_tray(self):
         """藏到托盘：窗口消失，进程和定时器都留着，提醒照常弹"""
@@ -7020,9 +7085,15 @@ def main():
             t = _tray_mod.Tray(app)
             if t.start():
                 app._tray = t
+                app._tray_failed = False
                 app._tray.update_tip(app.app_name())
+            else:
+                # 非 Windows 或初始化失败：明确标记，✕ 才允许直接退出
+                app._tray = t
+                app._tray_failed = True
         except Exception as exc:
             app._tray = None
+            app._tray_failed = True
             try:
                 app.diag("[tray] 托盘启动失败：%r" % (exc,))
             except Exception:
