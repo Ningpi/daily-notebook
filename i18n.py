@@ -431,6 +431,18 @@ STRINGS = {
     "bubble_off": ("已关闭右下角未完成气泡", "Bubble off"),
     "bubble_empty": ("都做完啦，休息一下吧", "All done — take a break"),
     "bubble_none": ("暂无任务", "No tasks"),
+
+    # —— 日常任务（v1.9.9.27：每天/每周X 重复的任务）
+    "grp_daily": ("日常", "Daily"),
+    "grp_tmp": ("临时", "One-off"),
+    "grp_done": ("已完成", "Done"),
+    "daily_progress": ("今日 {d}/{n}", "{d}/{n} today"),
+    "daily_checked": ("打卡了：{t}", "Checked in: {t}"),
+    "daily_unchecked": ("已取消今天的打卡：{t}", "Undid today's check-in: {t}"),
+    "daily_left": ("日常 {d}/{n} · 临时 {m} 件没做",
+                   "Daily {d}/{n} · {m} one-off left"),
+    "counter_plain": ("待办 {left} · 已完成 {done}", "{left} to do · {done} done"),
+    "daily_tip": ("这是每天都要做的事", "This is a daily task"),
 }
 
 

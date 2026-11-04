@@ -1396,3 +1396,199 @@ class TestV199926CalendarAndSuffix:
             else:
                 misses += 1
         assert hits >= 1 and misses >= 1
+
+
+class TestV199927DailyTaskEntry:
+    """v1.9.9.27：日常任务（每天X点做）不能被当成「已过截止时间」拒绝"""
+
+    def _fresh(self, app):
+        a = app
+        a.store.setup_stage = 3
+        a.store.tasks = []
+        a.store.save()
+        a._pending_q = None
+        a._pending_task = None
+        a._pending_expired = None
+        return a
+
+    def test_daily_task_after_time_not_rejected(self, app):
+        """晚上 20 点说「每天早上八点背单词」→ 应正常录入，不弹过期确认"""
+        a = self._fresh(app)
+        a.respond("每天早上八点背单词")
+        assert a.store.tasks, "日常任务被「时间已过」挡掉了"
+        t = a.store.tasks[0]
+        assert t.get("repeat"), "repeat 没存上"
+        assert t["hhmm"] == "08:00"
+        assert t.get("repeat", {}).get("kind") == "daily"
+
+    def test_one_off_task_still_asks_expired(self, app):
+        """一次性任务时间已过仍要确认（不因上面修复而放松）"""
+        a = self._fresh(app)
+        r = a.respond("今天8点开会")
+        assert "过截止日期" in (r or ""), "一次性过期任务应该仍然询问"
+
+
+class TestV199927DailyList:
+    """v1.9.9.27 第二步：日常任务在列表里的呈现与打卡
+
+    设计（用户确认过的三条约束）：
+      · 不分两栏、不做「连续 N 天」徽章、断签不提示；
+      · 日常任务没有优先级，靠颜色（青）和临时任务区分；
+      · 勾掉后留在日常区灰化，不坠入底部已完成区。
+    """
+
+    def _fresh(self, app):
+        a = app
+        a.store.setup_stage = 3
+        a.store.tasks = []
+        a.store.save()
+        a._pending_q = None
+        a._pending_task = None
+        a._pending_expired = None
+        a._pending_remind = None
+        return a
+
+    def _daily(self, a, title="背单词", hhmm="08:00", kind="daily", **kw):
+        rep = {"kind": kind, "weekday": None, "monthday": None}
+        rep.update(kw)
+        t = {"id": "d%d" % (len(a.store.tasks) + 1), "title": title,
+             "score": 0, "done": False, "done_at": None, "hhmm": hhmm,
+             "due_date": None, "day": a.store._today(), "repeat": rep,
+             "created": "08:00"}
+        a.store.tasks.append(t)
+        a.store.save()
+        return t
+
+    def _tmp(self, a, title="买牛奶", score=60):
+        t = {"id": "t%d" % (len(a.store.tasks) + 100), "title": title,
+             "score": score, "done": False, "done_at": None, "hhmm": None,
+             "due_date": None, "repeat": None, "day": a.store._today(),
+             "created": "08:00"}
+        a.store.tasks.append(t)
+        a.store.save()
+        return t
+
+    # ---- 分组
+    def test_daily_group_comes_first(self, app):
+        a = self._fresh(app)
+        self._tmp(a, "买牛奶", score=95)        # 临时任务分数更高也不行
+        self._daily(a, "背单词")
+        groups = a.list_groups()
+        assert [g for g, _ in groups][0] == "daily"
+        assert groups[0][1][0][1]["title"] == "背单词"
+
+    def test_daily_group_ignores_priority(self, app):
+        """日常任务按时间排，不看 score"""
+        a = self._fresh(app)
+        self._daily(a, "晚跑", hhmm="21:00")
+        self._daily(a, "背单词", hhmm="08:00")
+        names = [t["title"] for _, t in a.list_groups()[0][1]]
+        assert names == ["背单词", "晚跑"]
+
+    def test_checked_daily_stays_in_daily_group(self, app):
+        """打卡后留在日常区（不能坠进「已完成」）"""
+        a = self._fresh(app)
+        d = self._daily(a, "背单词")
+        a.toggle_done(d["id"])
+        assert d["done"] is True
+        groups = dict((g, items) for g, items in a.list_groups())
+        assert "daily" in groups
+        assert [t["title"] for _, t in groups["daily"]] == ["背单词"]
+        assert "tmp_done" not in groups
+
+    def test_tmp_done_goes_to_done_group(self, app):
+        """临时任务勾掉后仍然进已完成区（老行为不变）"""
+        a = self._fresh(app)
+        t = self._tmp(a, "买牛奶")
+        a.toggle_done(t["id"])
+        groups = dict((g, items) for g, items in a.list_groups())
+        assert "tmp_done" in groups and "tmp_undone" not in groups
+
+    # ---- 打卡行为
+    def test_check_in_writes_history(self, app):
+        a = self._fresh(app)
+        d = self._daily(a, "背单词")
+        a.toggle_done(d["id"])
+        rows = a.store.history.get(a.store._today()) or []
+        hit = [r for r in rows if r.get("daily") and r.get("id") == d["id"]]
+        assert hit, "打卡没写进当天 history"
+
+    def test_uncheck_same_day_rolls_back(self, app):
+        a = self._fresh(app)
+        d = self._daily(a, "背单词")
+        a.toggle_done(d["id"])
+        a.toggle_done(d["id"])
+        assert d["done"] is False
+        assert d.get("streak") == 0
+        rows = a.store.history.get(a.store._today()) or []
+        assert not [r for r in rows if r.get("daily") and r.get("id") == d["id"]]
+
+    def test_streak_counts_contiguous_days(self, app):
+        a = self._fresh(app)
+        yday = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+        d = self._daily(a, "背单词")
+        d["last_done_day"] = yday
+        d["streak"] = 4
+        a.toggle_done(d["id"])
+        assert d["streak"] == 5
+        assert d["last_done_day"] == a.store._today()
+
+    def test_streak_breaks_to_one(self, app):
+        a = self._fresh(app)
+        d = self._daily(a, "背单词")
+        d["last_done_day"] = "2000-01-01"
+        d["streak"] = 9
+        a.toggle_done(d["id"])
+        assert d["streak"] == 1
+
+    def test_same_day_retoggle_no_stacking(self, app):
+        a = self._fresh(app)
+        d = self._daily(a, "背单词")
+        a.toggle_done(d["id"])
+        a.toggle_done(d["id"])
+        a.toggle_done(d["id"])
+        assert d["streak"] == 1, "同一天反复勾不算多天"
+
+    # ---- 底栏计数
+    def test_counter_two_part(self, app):
+        a = self._fresh(app)
+        self._daily(a, "背单词")
+        self._daily(a, "跑步", hhmm="19:00")
+        self._tmp(a, "买牛奶")
+        a.refresh_tasks()
+        txt = a.counter.cget("text")
+        assert "0/2" in txt and "1" in txt, txt
+
+    def test_counter_plain_without_daily(self, app):
+        a = self._fresh(app)
+        self._tmp(a, "买牛奶")
+        a.refresh_tasks()
+        txt = a.counter.cget("text")
+        assert "/" not in txt or "待办" in txt, txt
+
+    # ---- 每周多天
+    def test_weekly_multi_days_parsed(self):
+        import parser as P
+        rep = P.find_repeat("每周一三五跑步")
+        assert rep["weekdays"] == [0, 2, 4]
+        assert P.repeat_due_today(rep, dt.date(2024, 1, 1)) is True    # 周一
+        assert P.repeat_due_today(rep, dt.date(2024, 1, 2)) is False   # 周二
+        assert P.repeat_due_today(rep, dt.date(2024, 1, 3)) is True    # 周三
+
+    # ---- 跨天
+    def test_roll_day_revives_due_daily(self, app):
+        a = self._fresh(app)
+        d = self._daily(a, "背单词")
+        d["done"] = True
+        d["done_at"] = "08:05"
+        a.store._roll_day(a.store._today())
+        assert d["done"] is False and d["done_at"] is None
+
+    def test_roll_day_parks_not_due_daily(self, app):
+        a = self._fresh(app)
+        # 每周一，今天不是周一 → 压在已完成区
+        wd = dt.date.today().weekday()
+        other = (wd + 1) % 7
+        d = self._daily(a, "开会", kind="weekly", weekday=other)
+        a.store._roll_day(a.store._today())
+        assert d["done"] is True

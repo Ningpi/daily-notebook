@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.26"
+VERSION = "1.9.9.27"
 
 
 # ----------------------------------------------------------------- 配色
@@ -96,6 +96,13 @@ C = _Tokens(palette.THEMES[0])
 C_BAR_LOW = "#7C95AB"
 C_BAR_MID = "#E8942F"
 C_BAR_FULL = "#4CAF6E"
+
+# v1.9.9.27：日常任务（每天/每周X 重复）专用色。
+# 用青绿色系与临时任务的「红橙蓝灰」优先级色区分开——日常不参与优先级，
+# 只在视觉上让人一眼看出「这是每天要做的事」。
+C_DAILY = "#2F8F83"          # 日常任务竖条 / 徽标 / 气泡强调条
+C_DAILY_BG = "#EAF6F3"       # 日常行极淡底色（浅色主题下）
+C_DAILY_SOFT = "#BFE3DC"     # 日常行底色（与主题底色混合用）
 
 TIPS = [
     "把任务直接说给我，我来帮你排优先级。",
@@ -234,32 +241,43 @@ class Store(object):
                     self.sync_history(day=saved_day)
                 except Exception:
                     pass
-                for t in self.tasks:
-                    if t.get("repeat"):
-                        # 周期任务：到点才复活，不到点压到已完成区
-                        try:
-                            t["done"] = not core.repeat_due_today(t["repeat"])
-                        except Exception:
-                            pass
-                        if t["done"]:
-                            t["done_at"] = None
-                        t["reminded"] = False
-                        t["reminded_day"] = None
-                        continue
-                    dd = t.get("due_date")
-                    if dd:
-                        # 有明确截止日：还没到就保留时刻，过期才清
-                        if dd < today and not t.get("done"):
-                            t["hhmm"] = None
-                    elif not t.get("done"):
-                        t["hhmm"] = None
-                    t["reminded"] = False
-                    t["reminded_day"] = None
-                    # day 保留原始创建日（历史按天归集要用它）
+                self._roll_day(today)
                 self.today = today
                 self.messages = []
         except Exception:
             pass
+
+    def _roll_day(self, today):
+        """跨天重置（v1.9.9.27：抽成一处，启动和运行时 tick 共用一套规则）
+
+        日常任务（带 repeat）：
+          - 今天该做 → 复活（done=False），`last_done_day` 留着，靠它算连续；
+          - 今天不该做（如每周一三五的跑，今天是周二）→ 压在已完成区，
+            不让用户看到一件「今天根本不用做」的活。
+        """
+        for t in self.tasks:
+            t["reminded"] = False
+            t["reminded_day"] = None
+            rep = t.get("repeat")
+            if rep:
+                try:
+                    due = core.repeat_due_today(rep)
+                except Exception:
+                    due = False
+                if due:
+                    t["done"] = False
+                    t["done_at"] = None
+                else:
+                    t["done"] = True
+                continue
+            dd = t.get("due_date")
+            if dd:
+                # 有明确截止日：还没到就保留时刻，过期才清
+                if dd < today and not t.get("done"):
+                    t["hhmm"] = None
+                continue
+            if not t.get("done"):
+                t["hhmm"] = None
 
     def q_state(self, lang):
         return self.quotes.setdefault("en" if lang == "en" else "zh",
@@ -973,14 +991,20 @@ class Bubble(object):
             except Exception:
                 pass
             row.configure(bg=C.LINE)
-            inner = tk.Frame(row, bg=C.ROW2, highlightthickness=1,
-                             highlightbackground=C.LINE)
+            # v1.9.9.27：日常任务（带 repeat）特殊标注 —— 青色色条 + 青色底 +
+            # 标题前的 ● 与青色字，跟临时任务的优先级色一眼分开。用户明确要求
+            # 「日常任务没有优先级，但气泡里必须能看出来不一样」。
+            daily = self.app._is_daily(t)
+            _rowbg = C_DAILY_BG if daily else C.ROW2
+            inner = tk.Frame(row, bg=_rowbg, highlightthickness=1,
+                             highlightbackground=(C_DAILY if daily else C.LINE))
             inner.pack(fill="both", expand=True, padx=1, pady=1)
             # v1.9.9：色条跟主列表同一套优先级色（紧急红/重要橙/一般蓝/不急灰）
             _plabel, pcolor = core.priority_label(t.get("score", 0))
-            dot = tk.Frame(inner, bg=pcolor, width=3)
+            dot = tk.Frame(inner, bg=(C_DAILY if daily else pcolor), width=3)
             dot.pack(side="left", fill="y")
-            lbl = tk.Label(inner, text=disp, bg=C.ROW2, fg=C.TEXT,
+            lbl = tk.Label(inner, text=("● " + disp) if daily else disp,
+                           bg=_rowbg, fg=(C_DAILY if daily else C.TEXT),
                            font=self.app.f_small, anchor="w", padx=8)
             lbl.pack(side="left", fill="x", expand=True)
             # 截止时间小字（右侧，弱色）：没有截止信息的任务不显示；
@@ -993,8 +1017,9 @@ class Bubble(object):
                                                         t.get("due_date")))
                 except Exception:
                     expired = False
-                dlc_lbl = tk.Label(inner, text="· " + dl, bg=C.ROW2,
-                                   fg="#E2434B" if expired else C.SUB,
+                dlc_lbl = tk.Label(inner, text="· " + dl, bg=_rowbg,
+                                   fg=("#E2434B" if expired else
+                                       (C_DAILY if daily else C.SUB)),
                                    font=self.app.f_small, anchor="e",
                                    padx=2)
                 dlc_lbl.pack(side="right", padx=(0, 8))
@@ -1795,6 +1820,38 @@ class NoteApp(object):
         if ratio >= 0.5:
             return C_BAR_MID
         return C_BAR_LOW
+
+    def _daily_counts(self):
+        """(今天该做的日常任务数, 其中已打卡数, 未做完的临时任务数)
+
+        日常任务按「今天到期」算，不是全量——每周一三五的跑步，周二
+        不该出现在今天的分母里。"""
+        dn = 0
+        dtoday = 0
+        tmp_left = 0
+        for t in self.store.tasks:
+            if self._is_daily(t):
+                if self._daily_due_today(t):
+                    dtoday += 1
+                    if t.get("done"):
+                        dn += 1
+            elif not t.get("done"):
+                tmp_left += 1
+        return dtoday, dn, tmp_left
+
+    def _counter_text(self, left, done):
+        """底栏计数（v1.9.9.27）：有日常任务时改成两段式
+
+        「日常 2/4 · 临时 3 件没做」——临时任务那栏不做分母，因为它
+        是无限累积的，算百分比没有意义；日常才有「今天做完没」的概念。
+        没有日常任务时保持原来的「待办 N · 已完成 M」。"""
+        try:
+            n, dn, tmp_left = self._daily_counts()
+        except Exception:
+            n = 0
+        if n:
+            return tr("daily_left", d=dn, n=n, m=tmp_left)
+        return tr("counter_plain", left=left, done=done)
 
     def draw_bar(self):
         cv = self.bar
@@ -4519,7 +4576,11 @@ class NoteApp(object):
             # 过期任务被静默丢弃，且在确认环节回「A」会被当成未听懂而卡死。
             # 改为：过期项排进队列，循环继续处理其余项，全部处理完再逐条确认。
             due_iso = item[6].isoformat() if (len(item) > 6 and item[6]) else None
-            if self._is_expired(hhmm, due_iso):
+            _rep = item[5] if len(item) > 5 else None
+            # v1.9.9.27：重复任务（每天/每周X）的钟点是「每天几点做」，
+            # 不是一次性截止时间——20 点设「每天早上八点背单词」不该被
+            # 判为「已过截止日期」而拒绝录入
+            if self._is_expired(hhmm, due_iso) and not (_rep and not due_iso):
                 q_item = {
                     "task": {
                         "id": "%d%03d" % (int(time.time() * 1000),
@@ -4601,6 +4662,36 @@ class NoteApp(object):
         undone.sort(key=lambda x: (-x[1].get("score", 0), x[1].get("hhmm") or "99:99", x[0]))
         done.sort(key=lambda x: x[1].get("done_at", ""), reverse=True)
         return undone + done
+
+    def list_groups(self):
+        """列表分组（v1.9.9.27）：日常 → 临时。
+
+        日常任务（带 repeat）：
+          - 不参与优先级排序，只按时间排（08:00 在最上）；
+          - **勾掉后仍留在日常区**（灰化 + 对勾），不像临时任务那样掉进
+            底部已完成区——否则用户看不到「今天打卡了没」。
+        临时任务：沿用原来的「未完成（按优先级）→ 已完成」。
+        返回 [(组名, [(索引, 任务), ...]), ...]，空组省略。"""
+        daily, tmp_undone, tmp_done = [], [], []
+        for idx, t in enumerate(self.store.tasks):
+            if self._is_daily(t):
+                daily.append((idx, t))
+            elif t.get("done"):
+                tmp_done.append((idx, t))
+            else:
+                tmp_undone.append((idx, t))
+        daily.sort(key=lambda x: (x[1].get("hhmm") or "99:99", x[0]))
+        tmp_undone.sort(key=lambda x: (-x[1].get("score", 0),
+                                       x[1].get("hhmm") or "99:99", x[0]))
+        tmp_done.sort(key=lambda x: x[1].get("done_at", ""), reverse=True)
+        groups = []
+        if daily:
+            groups.append(("daily", daily))
+        if tmp_undone:
+            groups.append(("tmp_undone", tmp_undone))
+        if tmp_done:
+            groups.append(("tmp_done", tmp_done))
+        return groups
 
     def row_height(self):
         return 30
@@ -4779,7 +4870,9 @@ class NoteApp(object):
         self._long_titles = {}      # v1.9.9.20：本屏被截断的标题（悬停提示用）
         w = max(cv.winfo_width(), 60)
         rh = self.row_height()
-        ordered = self.sorted_tasks()
+        # v1.9.9.27：分组渲染——日常（灰化后仍留原位）→ 临时未完成 → 已完成
+        groups = self.list_groups()
+        ordered = [x for _g, items in groups for x in items]
         # 先一次性批量算好每行标题是否放得下，避免逐行逐字量宽。
         # v1.9.7：每行按「时间 + 用时」算自己的可用宽度，与 draw_row 完全同口径
         # （旧版统一用 w-15-34，带时间的行实际可用更窄 → fits 高估 → 截断失真）
@@ -4791,12 +4884,18 @@ class NoteApp(object):
                                  self.f_task, avails)
         total = 0
         y = 2
-        for idx, (_, t) in enumerate(ordered):
-            self.draw_row(cv, y, w, rh, t, idx,
-                          fits[idx] if idx < len(fits) else True,
-                          avail=avails[idx] if idx < len(avails) else None)
-            y += rh
-            total += rh
+        k = 0
+        for gi, (gname, items) in enumerate(groups):
+            # 组头：日常 / 临时 / 已完成（只有多组时才画，单组保持清爽）
+            if len(groups) > 1:
+                y = self._draw_group_head(cv, y, w, gname, items)
+            for _idx, t in items:
+                self.draw_row(cv, y, w, rh, t, k,
+                              fits[k] if k < len(fits) else True,
+                              avail=avails[k] if k < len(avails) else None)
+                y += rh
+                k += 1
+        total = y - 2
         cv.config(scrollregion=(0, 0, w, max(total + 4, cv.winfo_height())))
         # v1.9.9.20：空列表时给一个显眼的「记一条」按钮，点击直接聚焦输入框
         # （只有聊天输入框时，鼠标用户第一次容易找不到从哪加任务）
@@ -4806,7 +4905,7 @@ class NoteApp(object):
             cv.yview_moveto(0)
         left = sum(1 for t in self.store.tasks if not t.get("done"))
         done = len(self.store.tasks) - left
-        self.counter.config(text=tr("counter", left=left, done=done))
+        self.counter.config(text=self._counter_text(left, done))
         self.draw_bar()
         # 日历视图打开时实时跟随任务变化（增删改/勾选都会走到这）
         cal = getattr(self, "_cal_win", None)
@@ -4913,16 +5012,50 @@ class NoteApp(object):
                 return hhmm
         return hhmm
 
+    def _draw_group_head(self, cv, y, w, gname, items=None):
+        """分组小标题（v1.9.9.27）：日常 / 临时 / 已完成
+
+        用一条浅色分隔线 + 左侧小字，不用大色块——便签本身已经很安静，
+        组头只是「视觉分段」，不该抢任务标题的注意力。"""
+        labels = {"daily": tr("grp_daily"), "tmp_undone": tr("grp_tmp"),
+                  "tmp_done": tr("grp_done")}
+        txt = labels.get(gname, "")
+        h = 20
+        col = C_DAILY if gname == "daily" else C.SUB
+        cv.create_text(8, y + h / 2, text=txt, anchor="w",
+                       font=self.f_tiny, fill=col)
+        if gname == "daily":
+            # 日常组头右侧写「今日 x/y」，一眼知道今天打卡进度
+            items = items or []
+            n = len(items)
+            dn = sum(1 for _i, t in items if t.get("done"))
+            if n:
+                cv.create_text(w - 8, y + h / 2, text=tr("daily_progress", d=dn, n=n),
+                               anchor="e", font=self.f_tiny, fill=col)
+        tw = self.text_width(txt, self.f_tiny) + 16
+        cv.create_line(tw, y + h / 2, w - 8, y + h / 2,
+                       fill=_mix(C.LINE, C.BG, 0.35))
+        return y + h
+
     def draw_row(self, cv, y, w, rh, task, idx, title_fits=True, avail=None):
         tid = task["id"]
         done = bool(task.get("done"))
-        bg = C.BG if idx % 2 == 0 else _mix(C.BG, C.ACCENT, 0.07)
+        daily = self._is_daily(task)
+        if daily:
+            # 日常行：极淡青底 + 青色竖条，和临时任务的 红/橙/蓝/灰 分开
+            bg = _mix(C.BG, C_DAILY, 0.10) if not done else _mix(C.BG, C_DAILY, 0.05)
+        else:
+            bg = C.BG if idx % 2 == 0 else _mix(C.BG, C.ACCENT, 0.07)
         cv.create_rectangle(0, y, w, y + rh, fill=bg, outline="",
                             tags=("row_" + tid,))
-        # 优先级竖条
+        # 竖条：日常 = 固定青色（不参与优先级）；临时 = 优先级色
         label, color = core.priority_label(task.get("score", 0))
-        if not done:
-            cv.create_rectangle(6, y + 6, 9, y + rh - 6, fill=color, outline="")
+        if daily:
+            color = C_DAILY
+        if not done or daily:
+            cv.create_rectangle(6, y + 6, 9, y + rh - 6,
+                                fill=color if not done else _mix(color, bg, 0.55),
+                                outline="")
         # 时间（主）+ 时长（次，更浅的小字）：与 refresh_tasks 同口径（v1.9.7）
         # v1.9.8：时间固定画在行首 15px —— 之前误用 _row_prefix_w 返回的
         # 「标题起点」当时间起点，带截止时间的行整体右移了一截（时间前留空）
@@ -4930,10 +5063,17 @@ class NoteApp(object):
         # （之前时间宽被算两次，标题与时间之间空出一大截）
         tx, dw, dur_txt = self._row_prefix_w(task, w)
         hhmm = task.get("hhmm")
+        # 日常任务在时间前加一个青色小标记，扫一眼就知道「这是每天的事」
+        if daily:
+            cv.create_text(11, y + rh / 2, text="●", anchor="w",
+                           font=self.f_tiny,
+                           fill=C_DAILY if not done else _mix(C_DAILY, bg, 0.55))
         if hhmm:
             tshow = self._tshow(task, hhmm)
             cv.create_text(15, y + rh / 2, text=tshow, anchor="w",
-                           font=self.f_small, fill=C.SUB if done else color)
+                           font=self.f_small,
+                           fill=(_mix(C_DAILY, bg, 0.35) if (done and daily)
+                                 else (C.SUB if done else (C_DAILY if daily else color))))
         # 标题
         fnt = self.f_task
         title = task["title"]
@@ -5097,6 +5237,16 @@ class NoteApp(object):
                                  "prev": bool(t.get("done")),
                                  "prev_at": t.get("done_at") or "",
                                  "label": ("取消完成【%s】" if t.get("done") else "勾选完成【%s】") % t.get("title", "")})
+                if self._is_daily(t):
+                    # v1.9.9.27：日常任务 = 今天打卡（不写历史归档行，
+                    # 打卡记录由 _daily_toggle 单独写进当天 history）
+                    was = bool(t.get("done"))
+                    now_done, streak = self._daily_toggle(t)
+                    if now_done and not was:
+                        changed = True
+                        task = dict(t)
+                        self._daily_streak = streak
+                    break
                 t["done"] = not t.get("done")
                 t["done_at"] = dt.datetime.now().strftime("%H:%M") if t["done"] else ""
                 if t["done"]:
@@ -5106,6 +5256,11 @@ class NoteApp(object):
         self.store.save()
         self.refresh_tasks()
         if changed:
+            # 日常任务：说「打卡了」；临时任务：走原来的鼓励语
+            if getattr(self, "_daily_streak", None):
+                self.flash(tr("daily_checked", t=task["title"]))
+                self._daily_streak = None
+                return
             left = len([x for x in self.store.tasks if not x.get("done")])
             q = self.quote_on_complete(task, left)
             if q:
@@ -6683,7 +6838,9 @@ class NoteApp(object):
             self._cal_title.config(text="%d 年 %d 月" % (y, m))
         # 有日程的日期集合（截止日期 / 创建日 / 重复任务命中日）
         # v1.9.9.26：与 _cal_day_items 同源，避免「点上说没有安排」
+        # v1.9.9.27：日常任务当天已打卡的日期单独记一份，画成空心圈
         busy = set()
+        daily_all_done = set()      # 当天日常全部打卡的日期（画空心圈）
         today_s = self.store._today()
         for t in self.store.tasks:
             dd = t.get("due_date")
@@ -6699,6 +6856,13 @@ class NoteApp(object):
                 _d = _start + dt.timedelta(days=_i)
                 if self._cal_day_items(_d.isoformat()):
                     busy.add(_d.isoformat())
+        # 今天的日常若已全部打卡，圆点改成空心（○ = 还没打卡，● = 打完了）
+        try:
+            _n, _dn, _tmp = self._daily_counts()
+            if _n and _dn >= _n:
+                daily_all_done.add(today_s)
+        except Exception:
+            pass
         first = dt.date(y, m, 1)
         ndays = (dt.date(y + (m == 12), (m % 12) + 1, 1) - first).days
         lead = (first.weekday() + 1) % 7          # 周日开头
@@ -6734,14 +6898,90 @@ class NoteApp(object):
             if fest:
                 cv.create_text(x0 + cw / 2, y0 + 44, text=fest,
                                font=self.f_tiny, fill="#EE9A2B", tags=(tag,))
-            # 有日程：小圆点
+            # 有日程：小圆点（今天日常全部打完 → 空心圈，表示「已完成打卡」）
             if ds in busy:
-                cv.create_oval(x0 + cw / 2 - 3, y0 + ch - 14,
-                               x0 + cw / 2 + 3, y0 + ch - 8,
-                               fill=C.ACCENT, outline="", tags=(tag,))
+                _x, _y0, _y1 = x0 + cw / 2, y0 + ch - 14, y0 + ch - 8
+                if ds in daily_all_done:
+                    cv.create_oval(_x - 3, _y0, _x + 3, _y1,
+                                   outline=C_DAILY, width=1.4, tags=(tag,))
+                else:
+                    cv.create_oval(_x - 3, _y0, _x + 3, _y1,
+                                   fill=C_DAILY if ds == today_s else C.ACCENT,
+                                   outline="", tags=(tag,))
             # 点击日期 -> 底部显示当天安排
             cv.tag_bind(tag, "<Button-1>",
                         lambda e, dd=ds: self._cal_show_day(dd))
+
+    # ---------------- 日常任务（v1.9.9.27）
+    # 设计要点：**不新建表、不分栏**。日常任务就是带 repeat 的普通任务，
+    # 区别只有两点：
+    #   ① 勾掉后留在原位置灰化（而不是掉进已完成区），因为「今天的打卡」
+    #      和「这件事完结了」是两件事；
+    #   ② 不参与优先级排序（没有 score 竖条），只按时间排。
+    @staticmethod
+    def _is_daily(task):
+        """带 repeat 的任务 = 日常任务（每天 / 每周X / 工作日 / 每月X号）"""
+        rep = (task or {}).get("repeat")
+        return bool(rep and (rep.get("kind") if isinstance(rep, dict) else True))
+
+    def _daily_due_today(self, task, day=None):
+        """这个日常任务今天该不该做"""
+        rep = task.get("repeat")
+        if not rep:
+            return False
+        try:
+            return core.repeat_due_today(rep, day)
+        except Exception:
+            return True
+
+    def _daily_toggle(self, task, now=False):
+        """日常任务打卡 / 取消打卡（当天内可撤）。
+
+        返回 (是否已打卡, streak)。streak 只在「当天连续」时累加：
+        昨天该做且打过卡才 +1，断签归 1。
+        """
+        today = self.store._today()
+        if not task.get("done"):
+            # 打卡
+            task["done"] = True
+            task["done_at"] = dt.datetime.now().strftime("%H:%M")
+            last = task.get("last_done_day")
+            prev_streak = int(task.get("streak") or 0)
+            yday = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+            if last == today:
+                streak = max(1, prev_streak)         # 当天重复操作不叠加
+            elif last == yday:
+                streak = prev_streak + 1
+            else:
+                streak = 1
+            task["streak"] = streak
+            task["last_done_day"] = today
+            self._write_daily_history(task, today, True)
+            return True, streak
+        # 取消打卡：只允许当天撤销
+        task["done"] = False
+        task["done_at"] = None
+        if task.get("last_done_day") == today:
+            task["streak"] = max(0, int(task.get("streak") or 1) - 1)
+            task["last_done_day"] = None
+            self._write_daily_history(task, today, False)
+        return False, int(task.get("streak") or 0)
+
+    def _write_daily_history(self, task, day, done):
+        """把日常打卡写进 history（按 id 关联，改名不影响历史）"""
+        try:
+            rows = self.store.history.setdefault(day, [])
+            rows = [r for r in rows if not (r.get("id") == task.get("id")
+                                            and r.get("daily"))]
+            if done:
+                rows.append({"id": task.get("id"), "title": task.get("title"),
+                             "hhmm": task.get("hhmm"), "done": True,
+                             "daily": True, "at": task.get("done_at") or "",
+                             "streak": task.get("streak") or 1})
+            self.store.history[day] = rows
+            self.store.save_history()
+        except Exception:
+            pass
 
     def _cal_day_items(self, ds):
         """某天的安排：创建日/截止日命名的任务，外加重复任务
@@ -7384,24 +7624,7 @@ def main():
         if dt.date.today().isoformat() != app.store.today:
             app.store.sync_history()            # 先把昨天归档
             app.store.today = dt.date.today().isoformat()
-            for t in app.store.tasks:
-                t["reminded"] = False
-                t["reminded_day"] = None
-                if t.get("repeat"):
-                    # 周期任务：到点复活；昨天没做的沿用原时刻
-                    if core.repeat_due_today(t["repeat"]):
-                        t["done"] = False
-                        t["done_at"] = None
-                    else:
-                        t["done"] = True        # 今天不该做，先压到已完成区
-                    continue
-                if t.get("due_date"):
-                    # 有明确截止日：还没到就留着时刻，过了才清
-                    if t["due_date"] < app.store.today and not t.get("done"):
-                        t["hhmm"] = None
-                    continue
-                if not t.get("done"):
-                    t["hhmm"] = None
+            app.store._roll_day(app.store.today)
             app.store.messages = []
             app.store.save()
             app.refresh_tasks()

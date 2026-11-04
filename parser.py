@@ -852,10 +852,17 @@ def find_repeat(text):
         return None
     if re.search(r"(每个?工作日|周一到周五|工作日)", text):
         return {"kind": "workday", "weekday": None, "monthday": None}
-    m = re.search(r"每个?\s*(?:周|星期|礼拜)\s*([一二三四五六日天1-7])", text)
+    m = re.search(r"每个?\s*(?:周|星期|礼拜)\s*((?:[一二三四五六日天1-7][、,，和\s]*)+)", text)
     if m:
-        return {"kind": "weekly", "weekday": WEEKDAY_MAP.get(m.group(1), 0),
-                "monthday": None}
+        # v1.9.9.27：「每周一三五」原来只认第一个「一」，「三五」被丢掉，
+        # 变成「每周一」；顺带「周二四」也只算了周二。现在把这一段里
+        # 所有星期几都收集起来，命中任一天就算今天该做。
+        days = [WEEKDAY_MAP.get(c) for c in re.findall(r"[一二三四五六日天1-7]",
+                                                       m.group(1))]
+        days = [d for d in days if d is not None]
+        if days:
+            return {"kind": "weekly", "weekday": days[0],
+                    "weekdays": days, "monthday": None}
     if re.search(r"(每个?周(?!\s*[一二三四五六日天1-7])|每星期(?!\s*[一二三四五六日天])|每礼拜(?!\s*[一二三四五六日天]))", text):
         return {"kind": "weekly", "weekday": None, "monthday": None}
     m = re.search(r"每个?月\s*(\d{1,2}|[一二三四五六七八九十]{1,3})\s*[号日]", text)
@@ -877,6 +884,9 @@ def repeat_due_today(rep, d=None):
     if k == "workday":
         return d.weekday() < 5
     if k == "weekly":
+        wds = rep.get("weekdays")
+        if wds:
+            return d.weekday() in wds
         wd = rep.get("weekday")
         return True if wd is None else (d.weekday() == wd)
     if k == "monthly":
