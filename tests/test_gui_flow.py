@@ -65,6 +65,19 @@ def say(app, text, max_confirm=6):
     return r
 
 
+def settle(app):
+    """v1.9.9.22：把建任务后的追问流程答完。
+    新语义下待答状态中裸「撤回」= 取消流程，旧用例需先答完再撤。"""
+    for _ in range(6):
+        pt = getattr(app, "_pending_task", None)
+        if not pt:
+            break
+        app.respond("A" if pt.get("need_pri") else "不用")
+    for _ in range(3):
+        if not getattr(app, "_pending_remind", None):
+            break
+        app.respond("不用")
+
 # ===================================================== 对话建任务
 class TestDialogAddTask:
     def test_simple_task(self, app):
@@ -128,6 +141,7 @@ class TestDialogAddTask:
 
     def test_undo_task(self, app):
         say(app, "买牛奶")
+        settle(app)
         app.respond("撤回")
         assert app.store.tasks == []
 
@@ -287,6 +301,7 @@ class TestUndoSemantics:
     def test_bare_undo_removes_just_added_task(self, app):
         """刚建的任务，说「撤回」= 删掉它（最符合直觉）"""
         say(app, "买牛奶")
+        settle(app)
         assert len(app.store.tasks) == 1
         r = say(app, "撤回")
         assert app.store.tasks == []
@@ -299,6 +314,7 @@ class TestUndoSemantics:
         if isinstance(r, str) and "过截止日期" in r:
             r = app.respond("确认")        # 已过点就确认保留（时间不依赖）
         assert app.store.tasks[0]["hhmm"] == "20:00"
+        settle(app)
         app.respond("撤回")
         assert app.store.tasks[0]["hhmm"] is None
         assert app.store.tasks[0]["due_date"] is None
@@ -793,3 +809,233 @@ class TestV19921HintAndFocus:
         while __import__("time").time() < end:
             a.root.update()
             __import__("time").sleep(0.05)
+
+
+class TestV19922Undo:
+    """v1.9.9.22：撤回系统全面改造——指令覆盖面 / 3 步撤回栈 /
+    待确认优先取消 / 引导短任务 / 跨天历史 / 纯时间段"""
+
+    def _settle(self, a):
+        """把建任务后的追问流程答完（否则撤回会按设计先取消流程）"""
+        for _ in range(6):
+            pt = getattr(a, "_pending_task", None)
+            if not pt:
+                break
+            if pt.get("need_pri"):
+                a.respond("A")
+            else:
+                a.respond("不用")
+
+    def _clean(self, app):
+        a = app
+        a.store.setup_stage = 3
+        a.store.tasks = []
+        a.store.save()
+        a._undo_stack = []
+        a._undo_last = None
+        a._pending_q = None
+        a._pending_task = None
+        a._pending_expired = None
+        a._pending_remind = None
+        a._pending_dup = None
+        a._pending_meridiem = None
+        a._remind_asked_for = None
+        return a
+
+    def test_undo_intent_variants(self, app):
+        """撤回一下 / 撤销刚才的 / 说错了 / 打错了 / 刚才不算 / 重新记
+        都是撤回指令，不再建出「说错了」这种任务"""
+        for phrase in ("撤回一下", "撤销刚才的", "说错了", "打错了",
+                       "刚才不算", "重新记", "撤回上一条"):
+            a = self._clean(app)
+            a.respond("帮我买牛奶")
+            self._settle(a)
+            assert a.store.tasks, phrase + "：前置任务没建出来"
+            r = a.respond(phrase)
+            assert not a.store.tasks, phrase + "：任务没被撤掉，回复=" + (r or "")
+            assert "撤" in (r or "") or "取消" in (r or ""), phrase + "：" + str(r)
+
+    def test_undo_stack_three_steps(self, app):
+        """建任务 → 勾选 → 调优先级，连说三次撤回逐步还原"""
+        a = self._clean(app)
+        a.respond("帮我买牛奶")
+        self._settle(a)
+        tid = a.store.tasks[0]["id"]
+        a.toggle_done(tid)
+        a.set_priority(tid, 45)
+        t = a.store.tasks[0]
+        assert t["done"] and t["score"] == 45
+        a.respond("撤回")          # 撤优先级
+        t = a.store.tasks[0]
+        assert t["score"] == 95 and t.get("manual"), "第1步：优先级没还原：" + str(t["score"])
+        a.respond("撤回")          # 撤勾选
+        assert not a.store.tasks[0].get("done"), "第2步：勾选没还原"
+        a.respond("撤回")          # 撤建任务
+        assert not a.store.tasks, "第3步：任务没撤掉"
+
+    def test_undo_cancels_pending_flow_first(self, app):
+        """正在等优先级/时间确认时说撤回 → 只取消流程，不动任务与栈"""
+        a = self._clean(app)
+        a.respond("明天交报告")
+        # 走到追问环节
+        if not a._pending_task:
+            a.store.tasks[0]["hhmm"] = None
+            a._pending_task = {"id": a.store.tasks[0]["id"],
+                               "need_pri": True, "need_dl": True}
+            a._pending_q = "pri"
+        tid = a.store.tasks[0]["id"]
+        r = a.respond("撤回")
+        assert a.store.tasks and a.store.tasks[0]["id"] == tid, \
+            "撤回把原任务删了"
+        assert a._pending_q is None and a._pending_task is None, "流程没取消"
+        # 撤回栈仍在：再撤一次应能撤掉任务本身
+        r2 = a.respond("撤回任务")
+        assert not a.store.tasks, "第二次撤回没生效"
+
+    def test_undo_no_stack_text(self, app):
+        """没有可撤回内容时，提示不再教用户「撤回再报新时间」"""
+        a = self._clean(app)
+        r = a.respond("撤回")
+        assert "再报新时间" not in (r or ""), "文案还在误导：" + str(r)
+
+    def test_onboarding_short_task_not_nickname(self, app):
+        """引导阶段说「交作业」这类短任务是记事，不是起昵称"""
+        a = app
+        a.store.setup_stage = 0
+        a.store.user_name = ""
+        a.store.tasks = []
+        a.store.save()
+        a.respond("你好")
+        a.respond("交作业")
+        assert a.store.setup_stage == 3
+        assert a.store.tasks, "短任务被当昵称吞了"
+        assert not a.store.user_name, "把任务名当成了昵称：" + str(a.store.user_name)
+
+    def test_onboarding_name_still_saved(self, app):
+        """真昵称不受影响"""
+        a = app
+        a.store.setup_stage = 0
+        a.store.user_name = ""
+        a.store.tasks = []
+        a.store.save()
+        a.respond("你好")
+        a.respond("王小明")
+        assert a.store.user_name == "王小明"
+
+    def test_deadline_undo_reasks_remind(self, app):
+        """撤截止时间后 _remind_asked_for 必须清掉，重设时间才重新问提醒"""
+        a = self._clean(app)
+        a.respond("明天交报告")
+        t = a.store.tasks[0]
+        t["hhmm"] = "18:00"
+        a._remind_asked_for = t["id"]
+        a._undo_last = {"kind": "deadline", "id": t["id"]}
+        a.respond("撤回时间")
+        assert a._remind_asked_for is None, "已问提醒的标记没清"
+
+    def test_undo_purges_only_today_history(self, app):
+        """撤回录入只清今天的历史，昨天的同名记录保留"""
+        a = self._clean(app)
+        yday = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+        a.store.history = {yday: [{"title": "买牛奶", "done": True}]}
+        a.respond("帮我买牛奶")
+        self._settle(a)
+        a.respond("撤回任务")
+        assert not a.store.tasks
+        assert a.store.history.get(yday), "昨天的历史被误删"
+
+    def test_letter_prefix_with_action_creates_new_task(self, app):
+        """待答题时说「A 明天下午三点开会」：字母是回答，后半句是
+        新任务——不能整句被吞"""
+        a = self._clean(app)
+        a.respond("明天交报告")
+        if not a._pending_task:
+            a._pending_task = {"id": a.store.tasks[0]["id"],
+                               "need_pri": True, "need_dl": True}
+            a._pending_q = "pri"
+        n_before = len(a.store.tasks)
+        a.respond("A 明天下午三点开会")
+        titles = [t["title"] for t in a.store.tasks]
+        assert len(a.store.tasks) > n_before or any("开会" in x for x in titles), \
+            "新任务被问答吞了：" + str(titles)
+
+    def test_pure_time_reply_still_answers(self, app):
+        """待答题时只回「晚上8点」仍然当作回答，不建新任务"""
+        a = self._clean(app)
+        a.respond("明天交报告")
+        if not a._pending_task:
+            a._pending_task = {"id": a.store.tasks[0]["id"],
+                               "need_pri": True, "need_dl": True}
+            a._pending_q = "pri"
+        n_before = len(a.store.tasks)
+        a.respond("晚上8点")
+        assert len(a.store.tasks) == n_before, "纯时间被建成新任务"
+        assert a.store.tasks[0].get("hhmm") == "20:00", \
+            "时间没设置上：" + str(a.store.tasks[0].get("hhmm"))
+
+    def test_pending_q_cleared_after_answer(self, app):
+        """问答完成后 _pending_q / _pending_task 都要清掉（P2-10）"""
+        a = self._clean(app)
+        a.respond("明天交报告")
+        if not a._pending_task:
+            a._pending_task = {"id": a.store.tasks[0]["id"],
+                               "need_pri": True, "need_dl": True}
+            a._pending_q = "pri"
+        a.respond("A")
+        a.respond("不用")
+        assert a._pending_q is None and a._pending_task is None, \
+            "问答结束后状态没清干净"
+
+    def test_space_pure_time_merges(self, app):
+        """「开会 晚上8点」是一条任务，不是两条（P2-8）"""
+        import parser as core
+        ts = core.parse_tasks("开会 晚上8点")
+        assert len(ts) == 1, "纯时间段被拆成独立任务：" + str([t[0] for t in ts])
+        # 对照：真有实义内容的仍独立
+        ts2 = core.parse_tasks("凌晨两点睡，早上七点起")
+        assert len(ts2) == 2, "有实义内容的独立段被合并了"
+
+    def test_undo_prefix_never_a_task(self, app):
+        """parser 层兜底：撤回类短句即使漏过主流程也不建任务"""
+        import parser as core
+        assert core.parse_tasks("撤回一下") == []
+        assert core.parse_tasks("说错了") == []
+        assert core.parse_tasks("撤销刚才的") == []
+
+    def test_ui_ops_have_undo_records(self, app):
+        """勾选 / 优先级 / 删除 / 改名都会写入撤回记录"""
+        a = self._clean(app)
+        a.respond("帮我买牛奶")
+        self._settle(a)
+        tid = a.store.tasks[0]["id"]
+        a.toggle_done(tid)
+        assert a._undo_last and a._undo_last["kind"] == "done"
+        a.set_priority(tid, 95)
+        assert a._undo_last["kind"] == "priority"
+        t = a.store.tasks[0]
+        a._finish_edit_entry(None, "买两瓶牛奶") if False else None
+        # 改名路径：直接构造
+        a._undo_last = None
+        a._undo_stack = []
+        import tkinter as tk
+        e = tk.Entry(a.root)
+        e.insert(0, "买两瓶牛奶")
+        a._edit_item = "i"
+        orig = a.sorted_tasks
+        orig_coords = a.list_cv.coords
+        a.sorted_tasks = lambda: [(0, a.store.tasks[0])]
+        a.list_cv.coords = lambda item: (0, 10)
+        try:
+            a._finish_edit_entry(e, "买两瓶牛奶")
+        finally:
+            a.sorted_tasks = orig
+            a.list_cv.coords = orig_coords
+            e.destroy()
+        assert a._undo_last and a._undo_last["kind"] == "rename", "改名没有撤回记录"
+        a.store.tasks[0]["title"] = "买牛奶"
+        a._undo_last = None
+        a._undo_stack = []
+        a.delete_task(tid)
+        assert a._undo_last and a._undo_last["kind"] == "delete", "删除没有撤回记录"
+        r = a.respond("撤回")
+        assert a.store.tasks and a.store.tasks[0]["id"] == tid, "删除没被撤回"

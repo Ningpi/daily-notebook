@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.21"
+VERSION = "1.9.9.22"
 
 
 # ----------------------------------------------------------------- 配色
@@ -321,14 +321,20 @@ class Store(object):
     def save_history(self):
         self._atomic(self.hist_path, {"days": self.history})
 
-    def purge_history(self, titles):
-        """从历史（所有天）里移除指定标题的条目（v1.9.8：
-        手动删除的任务不再留在历史记录里，数据同步）"""
+    def purge_history(self, titles, only_today=False):
+        """从历史里移除指定标题的条目（v1.9.8：手动删除的任务不再留在
+        历史记录里，数据同步）。
+
+        P1 问题7（v1.9.9.22）：新增 only_today——撤回今天的录入只清
+        今天的历史，昨天及更早归档的记录是当时已成立的，不动；
+        手动删除仍清所有天。"""
         if not titles:
             return
         try:
+            days = [dt.date.today().isoformat()] if only_today \
+                else list(self.history.keys())
             changed = False
-            for day in list(self.history.keys()):
+            for day in days:
                 rows = self.history.get(day) or []
                 kept = [r for r in rows if r.get("title", "") not in titles]
                 if len(kept) != len(rows):
@@ -1043,6 +1049,7 @@ class NoteApp(object):
         self._edit_entry = None    # 当前正在编辑标题的 Entry
         self._bubble = None        # 右下角「未完成任务」气泡
         self._undo_last = None     # 最近一次可撤回的操作（v1.9.5）
+        self._undo_stack = []      # 撤回栈：最近 3 步（v1.9.9.22）
         self._pending_q = None     # 当前在等回答的是哪个追问（v1.9.5）
         self._font_cache = {}
         self._width_cache = {}
@@ -3154,11 +3161,20 @@ class NoteApp(object):
         # 引擎解析出的时间也算「时间」（「明天下午三点」旧正则接不住，v1.9.5），
         # 但必须防住「晚上八点提醒我做20个俯卧撑」这种带动作的整句新任务：
         # 只有「整句就是时间」才算回答，否则交给新任务解析。
-        if eng_time and not m and not time_m and not no_dl:
-            if not self._is_pure_time_reply(text):
-                return False, None, text
+        if (eng_time or time_m) and not m and not no_dl and not self._is_pure_time_reply(text):
+            return False, None, text
         if not m and not time_m and not no_dl and not eng_time:
             return False, None, text
+        # P1 问题5（v1.9.9.22）：「A 明天下午三点开会」——字母前缀会被当成
+        # 优先级回答、后半句被吞掉。剥掉字母前缀后若剩下带**动作动词**的
+        # 实义任务，整句按新任务处理。注意不能用 _taskish（「点」「周」
+        # 这些时间词会误伤「B 晚上八点」这种合法回答）。
+        if m and not i18n.is_en():
+            _rest = re.sub(r"^[abcdABCD][\s，,。.．]*", "", (text or "").strip())
+            if _rest and _rest != text.strip() and re.search(
+                    r"帮我|开会|写|交|发|买|去|做|完成|整理|复习|提醒|"
+                    r"报告|作业|周报|邮件|电话|考试|上课|下班", _rest):
+                return False, None, text
 
         replies = []
         if m and need_pri:
@@ -3258,7 +3274,12 @@ class NoteApp(object):
             need_dl = False
 
         if not need_pri and not need_dl:
+            # P2 问题10（v1.9.9.22）：问答链结束必须连 _pending_q 一起清，
+            # 否则后续输入仍被当作回答处理（新任务被吞）
             self._pending_task = None
+            if getattr(self, "_pending_q", None) == "pri":
+                self._pending_q = None
+                self._pending_remind = None
         else:
             pt["need_pri"], pt["need_dl"] = need_pri, need_dl
         self.store.save()
@@ -3756,6 +3777,13 @@ class NoteApp(object):
             self._finish_onboarding(None)
             return tr("onboard_skipped") + "\n" + tr("usage_guide")
 
+        # P0 问题4（v1.9.9.22）：像派活儿的短句（交作业 / 帮我买牛奶 /
+        # 明天3点开会）先按任务处理，绝不能被 extract_name 的短名兜底
+        # 当成昵称收下
+        if self._taskish(s):
+            self._finish_onboarding(None)
+            return tr("onboard_as_task") + "\n\n" + self.respond(s)
+
         nm = core.extract_name(s)
         if nm:
             self._finish_onboarding(nm)
@@ -3796,6 +3824,7 @@ class NoteApp(object):
     # 用户输错时间时，一句话撤回上一次的设置，不用翻聊天记录
     _UNDO_RE = None
     _UNDO_PAT = None
+    _UNDO_INTENT = None
 
     def _undo_re(self):
         import re as _re
@@ -3805,6 +3834,30 @@ class NoteApp(object):
                 r"改时间|改截止|时间错了|输错了|我打错了|打错了|"
                 r"undo|revert)\s*[。.！!～~]*\s*$", _re.I)
         return NoteApp._UNDO_RE
+
+    def _undo_intent(self):
+        """宽松的「撤回意图」识别（v1.9.9.22）。
+
+        覆盖：撤回一下 / 撤销刚才的 / 撤回上一条 / 撤回内容 / 说错了 /
+        打错了 / 刚才不算 / 重新记 等。规则：去掉标点后以撤回类词开头
+        且整体很短，或整句就是口语认错说法。代价：「撤回邮件给客户」
+        这类以撤回开头的真实任务会被当成指令（权衡后接受，见 QA 报告）。"""
+        import re as _re
+        if NoteApp._UNDO_INTENT is None:
+            NoteApp._UNDO_INTENT = _re.compile(
+                r"^[\s，,。.！!？?~～]*(?:帮我|请|麻烦)?\s*"
+                r"(?:撤回|撤销|撤掉|撤消|退回|undo|revert)"
+                r"[\s，,。.！!？?~～]*(?:一下|一下下|了|吧|呀|哈|"
+                r"刚才的?|刚刚的?|上一条?|上一?个|那一条?|那个|这个|"
+                r"内容|任务|待办|事项|操作|记录|时间|截止|提醒|优先级|"
+                r"刚才那个操作|刚才那步)?"
+                r"[\s，,。.！!？?~～]*(?:吧|了|呀)?[\s。.！!～~]*$"
+                r"|^[\s，,。.！!？?~～]*"
+                r"(?:说错了|我说错了|打错了|我打错了|输错了|我输错了|"
+                r"刚才不算|不算了|不算|重新记|重记|重新输入|重输|重来|"
+                r"刚才那(条|个|句)(不算|不要|删掉)|undo that|mistake)"
+                r"[\s。.！!～~]*$", _re.I)
+        return NoteApp._UNDO_INTENT
 
     def _undo_pat(self):
         """宽松版撤回口语：撤一下（时间）/ 把时间撤了 / 时间去掉 / 不要这个时间了 (v1.9.9)"""
@@ -3819,35 +3872,54 @@ class NoteApp(object):
         return NoteApp._UNDO_PAT
 
     def _match_undo(self, text):
-        """识别撤回指令；返回 "deadline" / "task" / None
+        """识别撤回指令；返回 "deadline" / "task" / "remind_at" / "cancel" / None
 
         v1.9.9 修复：以前光秃秃一句「撤回」一律当成「撤截止时间」，
         于是对一条本来就没有截止时间的任务说「撤回」，会得到
         「已经把【买牛奶】的截止时间撤掉了」这种凭空捏造的回复，
         任务本身也没被撤掉。现在改为：明确说了「撤回任务」才撤任务；
-        只说「撤回」时看上一次操作是什么（_undo_last.kind）——
+        只说「撤回」时看上一次操作是什么（撤回栈顶）——
         上一次是新建任务就撤整个任务，否则才按撤时间处理。
-        """
+
+        v1.9.9.22：正在等用户确认/回答（_pending_q 非空）时，「撤回」
+        优先**取消当前流程**，绝不去删原来的任务（原来在重复任务确认
+        中说撤回会把老任务删掉）。撤流程不消耗撤回栈。"""
         import re as _re
         t = (text or "").strip()
         if not t or len(t) > 20:
             return None
-        # 「撤回任务」「撤回待办」「撤回上一条」= 撤整个任务
+        # ① 待确认流程中：光秃秃的「撤回」= 取消当前问答/确认
+        #    （P0 问题3：绝不去删原来的任务）。但明确点名「任务/待办」
+        #    且当前问答是针对**刚建的这条任务**（pri/remind）时，
+        #    「撤回任务」仍然删掉它——这是文档承诺的行为；
+        #    dup/expired/meridiem 涉及的是老任务或尚未入库的任务，
+        #    一律只取消流程。
+        if getattr(self, "_pending_q", None) and self._undo_intent().match(t):
+            if _re.search(r"(任务|待办|事项|条目)", t) \
+                    and self._pending_q in ("pri", "remind"):
+                return "task"
+            return "cancel"
+        # ② 「撤回任务」「撤回待办」「撤回上一条」= 撤整个任务
         # v1.9.9.3：以前只认「任务」，说「撤回待办」会漏进解析器变成一条
         # 叫「撤回待办」的新任务
         if _re.search(r"(撤回|撤销|撤掉|退回|删掉|去掉)\s*(这个|那个|刚才|上一|这|最)?(条|个|的|一)?\s*(任务|待办|事项|条目)", t, _re.I):
             return "task"
-        if self._undo_re().match(t) or self._undo_pat().match(t):
+        # ③ 明确点名「时间」的撤回（撤一下时间 / 把时间撤了）
+        explicit_time = bool(self._undo_pat().match(t)) or bool(
+            _re.search(r"时间|截止|点钟|点儿", t))
+        if explicit_time and self._undo_pat().match(t):
+            return "deadline"
+        # ④ 撤回意图（宽匹配）：有记录按栈顶类型撤，没记录给交代
+        if self._undo_intent().match(t) or self._undo_re().match(t):
             rec = getattr(self, "_undo_last", None)
-            # 没有任何可撤回的操作（刚启动 / 已经撤过一次）→ 别硬编一句话出来
             if not rec:
                 return None
-            # 话里点名了「时间/截止」→ 意图明确，直接按撤时间走，不看记录类型
-            _explicit_time = bool(self._undo_pat().match(t)) or bool(
-                _re.search(r"时间|截止|点钟|点儿", t))
-            if rec.get("kind") == "remind_at" and not _explicit_time:
+            # v1.9.9.22：栈顶是 UI 操作（勾选/优先级/删除/改名）→ 撤回该操作
+            if rec.get("kind") in ("done", "priority", "delete", "rename"):
+                return rec["kind"]
+            if rec.get("kind") == "remind_at" and not explicit_time:
                 return "remind_at"      # v1.9.9.9：撤回刚才设的提醒时刻
-            if rec.get("kind") == "task" and not _explicit_time:
+            if rec.get("kind") == "task" and not explicit_time:
                 return "task"
             if rec.get("kind") == "deadline":                # 记录里写明这次是「清空截止时间」且任务本来就没有时间 → 无可撤回
                 if rec.get("hhmm") is None and rec.get("due") is None \
@@ -3860,17 +3932,34 @@ class NoteApp(object):
                         break
                 # 任务上压根没有截止时间，就别假装撤掉了
                 if task is not None and not (task.get("hhmm") or task.get("due_date")) \
-                        and not _explicit_time:
+                        and not explicit_time:
                     return None
             return "deadline"
         return None
 
     def _push_undo(self, rec):
-        """记一条可撤回的操作（只留最近 1 条，避免语义混乱）"""
+        """记一条可撤回的操作（保留最近 3 步，v1.9.9.22 从 1 步扩到 3 步）"""
+        stack = getattr(self, "_undo_stack", None)
+        if stack is None:
+            stack = self._undo_stack = []
+        stack.append(rec)
+        if len(stack) > 3:
+            stack.pop(0)
         self._undo_last = rec
 
+    def _pop_undo(self):
+        """弹出栈顶记录；测试直接塞 _undo_last 时也能工作"""
+        stack = getattr(self, "_undo_stack", None) or []
+        if stack:
+            rec = stack.pop()
+        else:
+            rec = getattr(self, "_undo_last", None)
+        self._undo_last = stack[-1] if stack else None
+        return rec
+
     def _do_undo(self, kind):
-        """执行撤回。kind=deadline 撤时间并重新追问；kind=task 撤掉整个任务"""
+        """执行撤回。kind=deadline 撤时间并重新追问；kind=task 撤掉整个任务；
+        kind=cancel 只取消当前待确认流程，不动撤回栈（v1.9.9.22）"""
         # 先把所有待答状态清干净：撤回是一次「重新开始」
         self._pending_q = None
         self._pending_task = None
@@ -3878,28 +3967,30 @@ class NoteApp(object):
         self._pending_remind = None
         self._pending_dup = None
         self._pending_meridiem = None
-        rec = getattr(self, "_undo_last", None)
+        self._remind_asked_for = None
+        if kind == "cancel":
+            return tr("undo_cancelled")
+        rec = self._pop_undo()
         task = None
         if rec:
             for t in self.store.tasks:
                 if t["id"] == rec.get("id"):
                     task = t
                     break
+        # v1.9.9.22：UI 操作类撤回（勾选 / 优先级 / 删除 / 改名）
+        if kind in ("done", "priority", "delete", "rename"):
+            return self._undo_ui_op(kind, rec)
         if kind == "task":
-            if rec and rec.get("state") is not None and task is None:
-                # 撤回「刚加进来」的任务：优先用记录里的索引位置还原
-                pass
             if task is None:
                 return tr("undo_none")
             self.store.tasks.remove(task)
             # v1.9.9.3：撤回 = 撤销这次录入，历史里的当日记录一并清掉
-            # （与右键删除 delete_task 的行为保持一致），否则历史窗口里
-            # 还躺着一条已被撤回的任务
+            # v1.9.9.22：只清**今天**的历史——昨天归档的是当时已经成立的
+            # 记录，撤回今天的录入不应该把昨天的也抹掉（同名任务跨天）
             _t = task.get("title", "")
             if _t:
-                self.store.purge_history({_t})
+                self.store.purge_history({_t}, only_today=True)
             self.store.save()
-            self._undo_last = None
             try:
                 if self._hist_win is not None and self._hist_win.winfo_exists():
                     self._render_history()
@@ -3918,7 +4009,6 @@ class NoteApp(object):
             task["remind_before"] = prev.get("remind_before")
             self.store.save()
             self.refresh_tasks(scroll_top=True)
-            self._undo_last = None
             self._remind_asked_for = task["id"]
             self._pending_remind = task["id"]
             self._pending_q = "remind"
@@ -3928,7 +4018,6 @@ class NoteApp(object):
             return tr("undo_none")
         # v1.9.9：任务本来就没有截止时间，就不要谎称「撤掉了截止时间」
         if not (task.get("hhmm") or task.get("due_date")):
-            self._undo_last = None
             return tr("undo_no_dl", t=task["title"])
         task["hhmm"] = None
         task["due_date"] = None
@@ -3936,11 +4025,50 @@ class NoteApp(object):
         task.pop("remind_before", None)
         self.store.save()
         self.refresh_tasks(scroll_top=True)
-        self._undo_last = None
+        # v1.9.9.22 问题6：清掉「已问过提醒」的标记——否则重新设时间时
+        # 不再追问「提前多久提醒」
+        self._remind_asked_for = None
         # 重新走一遍截止时间追问，用户直接说新时间即可
         self._pending_task = {"id": task["id"], "need_pri": False, "need_dl": True}
         self._pending_q = "pri"
         return tr("undo_dl_done", t=task["title"])
+
+    def _undo_ui_op(self, kind, rec):
+        """撤回 UI 操作（勾选/优先级/删除/改名），v1.9.9.22"""
+        if not rec:
+            return tr("undo_none")
+        label = rec.get("label") or "上一步操作"
+        if kind == "delete":
+            old = rec.get("task")
+            if not old:
+                return tr("undo_none")
+            # 还原到原来的位置（没有就放最前面）
+            idx = rec.get("index")
+            if isinstance(idx, int) and 0 <= idx <= len(self.store.tasks):
+                self.store.tasks.insert(idx, old)
+            else:
+                self.store.tasks.insert(0, old)
+            self.store.save()
+            self.refresh_tasks(scroll_top=True)
+            return tr("undo_generic_done", label=label)
+        task = None
+        for t in self.store.tasks:
+            if t.get("id") == rec.get("id"):
+                task = t
+                break
+        if task is None:
+            return tr("undo_none")
+        if kind == "done":
+            task["done"] = bool(rec.get("prev"))
+            task["done_at"] = rec.get("prev_at") or ""
+        elif kind == "priority":
+            task["score"] = rec.get("prev_score")
+            task["manual"] = bool(rec.get("prev_manual"))
+        elif kind == "rename":
+            task["title"] = rec.get("prev") or task["title"]
+        self.store.save()
+        self.refresh_tasks(scroll_top=True)
+        return tr("undo_generic_done", label=label)
 
     def respond(self, text):
         """生成回复，并处理任务增删"""
@@ -4021,6 +4149,10 @@ class NoteApp(object):
             # 指定时刻：直接写「08:00」「前一晚21点」「早上7点半」
             at_min = self._parse_remind_clock(text) if is_short else None
             if task is not None and (m_r or at_min is not None):
+                # P2 问题10（v1.9.9.22）：提醒问答已得到回答，追问状态
+                # 必须清掉——否则紧跟着的「撤回」会被当成取消流程
+                self._pending_q = None
+                self._pending_remind = None
                 tok = (m_r.group(1) or "").strip().upper() if m_r else ""
                 if tok == "F" and at_min is None:
                     return tr("ask_remind_at")     # 只想指定时刻，等下一句
@@ -4754,6 +4886,11 @@ class NoteApp(object):
         changed = False
         for t in self.store.tasks:
             if t["id"] == tid:
+                # v1.9.9.22：勾选/取消勾选也可撤回
+                self._push_undo({"kind": "done", "id": tid,
+                                 "prev": bool(t.get("done")),
+                                 "prev_at": t.get("done_at") or "",
+                                 "label": ("取消完成【%s】" if t.get("done") else "勾选完成【%s】") % t.get("title", "")})
                 t["done"] = not t.get("done")
                 t["done_at"] = dt.datetime.now().strftime("%H:%M") if t["done"] else ""
                 if t["done"]:
@@ -5000,6 +5137,10 @@ class NoteApp(object):
             pass
         if target is not None and val and val != target["title"]:
             _old = target.get("title", "")
+            # v1.9.9.22：改名也可撤回
+            self._push_undo({"kind": "rename", "id": target.get("id"),
+                             "prev": _old,
+                             "label": "改名「%s」→「%s」" % (_old, val)})
             target["title"] = val
             if not target.get("manual"):
                 target["score"] = core.score_task(val, val, target.get("hhmm"))
@@ -5053,6 +5194,11 @@ class NoteApp(object):
         """手动设定或恢复（score=None）优先级；手动的不会被后续自动打分覆盖"""
         for t in self.store.tasks:
             if t["id"] == tid:
+                # v1.9.9.22：优先级调整也可撤回
+                self._push_undo({"kind": "priority", "id": tid,
+                                 "prev_score": t.get("score"),
+                                 "prev_manual": bool(t.get("manual")),
+                                 "label": "调整【%s】的优先级" % t.get("title", "")})
                 if score is None:
                     t["score"] = core.score_task(t["title"], t["title"], t.get("hhmm"))
                     t["manual"] = False
@@ -5071,6 +5217,11 @@ class NoteApp(object):
         for t in self.store.tasks:
             if t["id"] == tid:
                 titles.add(t.get("title", ""))
+                # v1.9.9.22：删除也可撤回（还原原位置）
+                self._push_undo({"kind": "delete", "id": tid,
+                                 "task": dict(t),
+                                 "index": self.store.tasks.index(t),
+                                 "label": "删除【%s】" % t.get("title", "")})
         self.store.tasks = [t for t in self.store.tasks if t["id"] != tid]
         if titles:
             self.store.purge_history(titles)

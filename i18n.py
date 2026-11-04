@@ -184,8 +184,15 @@ STRINGS = {
     "dl_expired_ask_more": ("【{t}】的时间已经过截止日期咯，是重新说一个时间，还是不用设时间？（可直接回新时间，或回「不用」）",
                             "That deadline has passed. Give me a new time, or say \"none\" to skip it."),
     # 撤回（v1.9.5）
-    "undo_none": ("目前没有可撤回的操作。想改某个任务的时间，可以说「撤回」再报新时间，或右键任务选「编辑内容」。",
-                  "Nothing to undo. Right-click a task to edit it."),
+    # P2 问题9：撤回提示与实现一致（v1.9.9.22）
+    "undo_none": ("现在没有可撤回的操作。要改时间可以直接说新时间，或右键任务选「编辑内容」。",
+                  "Nothing to undo. Just type a new time, or right-click a task to edit it."),
+    # v1.9.9.22：撤回在待确认流程中 = 取消当前问答（不消耗撤回栈）
+    "undo_cancelled": ("好，已取消当前的操作，之前记的内容都没动。需要修改的话直接说新的就行。",
+                       "Okay, the pending question is cancelled. Nothing else was changed."),
+    # v1.9.9.22：UI 操作（勾选/优先级/删除/改名）撤回成功
+    "undo_generic_done": ("已撤回：{label}。",
+                          "Undone: {label}."),
     "undo_dl_done": ("已经把【{t}】的截止时间撤掉了。请重新说一个时间（例如「明天下午三点」），直接说就行。",
                      "Cleared the deadline of \"{t}\". Tell me the new time."),
     "undo_task_done": ("已经把【{t}】从待办里撤掉了。",

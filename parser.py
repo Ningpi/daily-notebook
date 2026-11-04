@@ -1056,9 +1056,13 @@ def extract_name(text):
             rest = " ".join(w[:1].upper() + w[1:] for w in rest.split())
         return rest
     # 兜底：整句就是个短名字（用户只回了「小李」）
+    # P0 问题4（v1.9.9.22）：含任务词的短句（交作业 / 开会 / 写报告）
+    # 不是昵称，别收
     s = re.sub(r"[\s，,。.！!？?；;：:]+", "", t)
     if 1 <= len(s) <= 6 and s not in _NAME_BAD \
-            and not re.search(r"[0-9]", s) and not SELF_RE.search(s):
+            and not re.search(r"[0-9]", s) and not SELF_RE.search(s) \
+            and not re.search(r"帮我|记|提醒|开会|报告|作业|周报|邮件|买|写|发|去|做|"
+                              r"交|分钟|小时|点|明天|今天|后天|周", s):
         return s
     return None
 
@@ -1167,6 +1171,11 @@ def parse_tasks(text, fallback=True):
     # v1.9.9.18：口头应答与纯时间指代（嗯嗯 / 谢谢啦 / 本周 / 可以的）不建任务
     if _is_pure_chat(text):
         return []
+    # P0 问题1（v1.9.9.22）：撤回类指令（撤回一下 / 撤销刚才的 / 说错了）
+    # 永远不能成为任务标题，即使主流程的撤回正则没接住
+    if re.match(r"^[\s，,。]*(?:撤回|撤销|撤掉|撤消|退回|undo|revert|说错了|打错了|"
+                r"输错了|刚才不算|重新记)", text, re.I) and len(whole) <= 12:
+        return []
     results, seen = [], set()
     prev = None
     for seg in split_segments(text):
@@ -1218,7 +1227,11 @@ def parse_tasks(text, fallback=True):
         if _is_noise(title):
             # v1.9.9.18：这一段自带明确时间/日期，说明它是独立的一件事
             # （「凌晨两点睡，早上七点起」的后半句），不该并进上一条
-            if prev is not None and (find_times(seg) or find_deadline_date(seg)[0]):
+            # P2 问题8（v1.9.9.22）：但纯时间（「开会 晚上8点」的
+            # 「晚上8点」剔掉时间后一个汉字都不剩）不能独立成任务，
+            # 仍并进上一条——只有剔完时间还剩实义字（「睡」「起」）才算独立
+            _cn_left = len(re.sub(r"[^\u4e00-\u9fff]", "", title))
+            if prev is not None and _cn_left >= 1 and (find_times(seg) or find_deadline_date(seg)[0]):
                 # 标题太短（只剩一个「起」）就用原段兜底，别让用户看到单字任务
                 if len(re.sub(r"[^\u4e00-\u9fff]", "", title)) < 2:
                     title = seg.strip()[:8] or title
