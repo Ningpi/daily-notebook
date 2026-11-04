@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.25"
+VERSION = "1.9.9.26"
 
 
 # ----------------------------------------------------------------- 配色
@@ -3229,9 +3229,13 @@ class NoteApp(object):
         # 优先级回答、后半句被吞掉。剥掉字母前缀后若剩下带**动作动词**的
         # 实义任务，整句按新任务处理。注意不能用 _taskish（「点」「周」
         # 这些时间词会误伤「B 晚上八点」这种合法回答）。
-        if m and not i18n.is_en():
-            _rest = re.sub(r"^[abcdABCD][\s，,。.．]*", "", (text or "").strip())
-            if _rest and _rest != text.strip() and re.search(
+        # v1.9.9.26：尾缀字母同样处理——「历史作业D」在等待截止时间时
+        # 会被当成回答吞掉（D 落在 pri_re 上，「历史作业」凭空消失）。
+        if not i18n.is_en():
+            _txt = (text or "").strip()
+            _rest = re.sub(r"^[abcdABCD][\s，,。.．]*", "", _txt)
+            _rest = re.sub(r"[\s，,。.．]*[abcdABCD]$", "", _rest)
+            if _rest and _rest != _txt and re.search(
                     r"帮我|开会|写|交|发|买|去|做|完成|整理|复习|提醒|"
                     r"报告|作业|周报|邮件|电话|考试|上课|下班", _rest):
                 return False, None, text
@@ -6677,7 +6681,8 @@ class NoteApp(object):
             self._cal_title.config(text="%d-%02d" % (y, m))
         else:
             self._cal_title.config(text="%d 年 %d 月" % (y, m))
-        # 有日程的日期集合（截止日期 / 创建日）
+        # 有日程的日期集合（截止日期 / 创建日 / 重复任务命中日）
+        # v1.9.9.26：与 _cal_day_items 同源，避免「点上说没有安排」
         busy = set()
         today_s = self.store._today()
         for t in self.store.tasks:
@@ -6686,6 +6691,14 @@ class NoteApp(object):
                 busy.add(dd)
             if t.get("day"):
                 busy.add(t["day"])
+        # 重复任务：把未来 60 天内命中的日期都标上（每天/每周X）
+        _rep_tasks = [t for t in self.store.tasks if (t.get("repeat") or "").find("每") >= 0]
+        if _rep_tasks:
+            _start = dt.date.today()
+            for _i in range(60):
+                _d = _start + dt.timedelta(days=_i)
+                if self._cal_day_items(_d.isoformat()):
+                    busy.add(_d.isoformat())
         first = dt.date(y, m, 1)
         ndays = (dt.date(y + (m == 12), (m % 12) + 1, 1) - first).days
         lead = (first.weekday() + 1) % 7          # 周日开头
@@ -6730,6 +6743,35 @@ class NoteApp(object):
             cv.tag_bind(tag, "<Button-1>",
                         lambda e, dd=ds: self._cal_show_day(dd))
 
+    def _cal_day_items(self, ds):
+        """某天的安排：创建日/截止日命名的任务，外加重复任务
+        （每天 → 天天算；每周X → 命中星期几才算）。
+
+        v1.9.9.26：原来只按 day/due_date 匹配——「每天背单词」只在
+        创建那天显示，之后日历天天显示「这天没有安排」，和主界面
+        的实际感受对不上（用户反馈的第二问）。"""
+        try:
+            d = dt.date.fromisoformat(ds)
+        except ValueError:
+            return []
+        items = []
+        for t in self.store.tasks:
+            if t.get("day") == ds or t.get("due_date") == ds:
+                items.append(t)
+                continue
+            rep = t.get("repeat") or ""
+            if not rep or t.get("day"):
+                # 有创建日的非重复任务不外推；重复任务也要求创建日 ≤ 当天
+                if not rep or (t.get("day") or "") > ds:
+                    continue
+            if "每" in rep and ("天" in rep or "日" in rep):
+                items.append(t)
+            else:
+                wd = "一二三四五六日"[d.weekday()]
+                if wd in rep or ("周" in rep and "末" in rep and d.weekday() >= 5):
+                    items.append(t)
+        return items
+
     def _cal_show_day(self, ds):
         try:
             d = dt.date.fromisoformat(ds)
@@ -6748,8 +6790,7 @@ class NoteApp(object):
             parts.append(tr("cal_work"))
         if fest:
             parts.append(fest)
-        items = [t for t in self.store.tasks if t.get("day") == ds
-                 or t.get("due_date") == ds]
+        items = self._cal_day_items(ds)
         if items:
             done = sum(1 for t in items if t.get("done"))
             parts.append(tr("cal_day_tasks", n=len(items), d=done))

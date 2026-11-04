@@ -1340,3 +1340,59 @@ class TestV199925CoreTrust:
         a.respond("这个嘛")
         assert a._pending_q is None and a._pending_task is None, "状态卡死了"
         assert a.store.tasks, "任务丢了"
+
+
+class TestV199926CalendarAndSuffix:
+    """v1.9.9.26：尾缀字母吞任务 + 日历重复任务不显示"""
+
+    def _fresh(self, app):
+        a = app
+        a.store.setup_stage = 3
+        a.store.tasks = []
+        a.store.save()
+        a._pending_q = None
+        a._pending_task = None
+        return a
+
+    def test_trailing_letter_task_not_swallowed(self, app):
+        """等截止时间时说「历史作业D」：D 不是回答，历史作业要建出来"""
+        a = self._fresh(app)
+        a.respond("语文作业")
+        a.respond("C")
+        r = a.respond("历史作业D")
+        titles = [t["title"] for t in a.store.tasks]
+        assert any("历史作业" in t for t in titles), "新任务被吞了：" + str(r)
+        assert not any("语文作业D" in t for t in titles)
+
+    def test_calendar_counts_repeat_tasks(self, app):
+        """「每天背单词」在之后的日期也应显示安排，不再说「这天没有安排」"""
+        import datetime as _dt
+        a = self._fresh(app)
+        a.store.tasks = [{"id": "r1", "title": "每天背单词", "score": 30,
+                          "done": False, "manual": False, "hhmm": None,
+                          "day": a.store._today(), "created": "09:00",
+                          "repeat": "每天"}]
+        a.store.save()
+        future = (_dt.date.today() + _dt.timedelta(days=6)).isoformat()
+        items = a._cal_day_items(future)
+        assert items, "重复任务没算进当天安排"
+        assert any("背单词" in t["title"] for t in items)
+
+    def test_calendar_weekly_repeat(self, app):
+        """「每周三开会」只在周三显示"""
+        import datetime as _dt
+        a = self._fresh(app)
+        a.store.tasks = [{"id": "w1", "title": "周三开会", "score": 30,
+                          "done": False, "manual": False, "hhmm": None,
+                          "day": a.store._today(), "created": "09:00",
+                          "repeat": "每周三"}]
+        a.store.save()
+        hits, misses = 0, 0
+        for i in range(1, 15):
+            d = _dt.date.today() + _dt.timedelta(days=i)
+            if a._cal_day_items(d.isoformat()):
+                hits += 1
+                assert d.weekday() == 2, "非周三也显示了"
+            else:
+                misses += 1
+        assert hits >= 1 and misses >= 1
