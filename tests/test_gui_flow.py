@@ -1676,14 +1676,23 @@ class TestV199928UserAudit:
         assert not a.store.tasks
         assert "没找到" in (r or ""), r
 
-    # ---- 提醒选项外的字母
-    def test_unknown_letter_means_no_remind(self, app):
+    # ---- 提醒选项：A 确实是「提前 5 分钟」
+    def test_remind_letter_a_sets_five_minutes(self, app):
+        """提醒选项表是 A/B/C/D/E/F（5/15/30/60/不提醒/指定时刻），
+        A 是合法选项，不能被当成「选项外的字母」丢掉。
+        （v1.9.9.28 曾误判过一次，这条用例把它钉住。）"""
         a = self._fresh(app)
         a.respond("下午三点开会")
-        a.respond("A")          # 优先级答 A
-        a.respond("A")          # 这里问的是 E/F，A 不在选项里
-        t = a.store.tasks[0]
-        assert not t.get("remind_before"), "不该静默设成提前 5 分钟：%r" % t.get("remind_before")
+        a.respond("A")          # 优先级：紧急
+        a.respond("A")          # 提醒：提前 5 分钟
+        assert a.store.tasks[0].get("remind_before") == 5
+
+    def test_remind_letter_e_means_no_remind(self, app):
+        a = self._fresh(app)
+        a.respond("下午三点开会")
+        a.respond("D")          # 优先级：不急
+        a.respond("E")          # 不提醒
+        assert not a.store.tasks[0].get("remind_before")
 
     # ---- 今天做了什么
     def test_done_today_report(self, app):

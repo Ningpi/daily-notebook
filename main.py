@@ -479,6 +479,10 @@ _USER_NAME_RE = re.compile(
     r"设置我的名字是|设置我的昵称是|改名叫)\s*([^，,。.!！?？\s]{1,12}?)\s*"
     r"[吧哦呀啊啦哈。.！!～~]*\s*$")
 
+# v1.9.9.29：元指令处理器的「已处理但不回话」哨兵。
+# 用独立对象而不是 ""——空串会和 None（=没处理）混在一起。
+_SILENT = object()
+
 
 class IconCache(object):
     """assets/icons/<主题>/<图标>_<深浅>.png 的懒加载缓存。
@@ -4220,58 +4224,86 @@ class NoteApp(object):
         self.refresh_tasks(scroll_top=True)
         return tr("undo_generic_done", label=label)
 
-    def respond(self, text):
-        """生成回复，并处理任务增删"""
-        # ① 首次见面：先问昵称，再问助手叫什么（问完之前不解析任务）
-        onboarding = self._onboarding(text)
-        if onboarding is not None:
-            return onboarding
-
-        # ② 「你是谁 / 介绍你自己」
+    # ---------------- 元指令表（v1.9.9.29 重构）
+    # 这 5 类输入不需要理解语义，只是识别固定句式，且必须早于任务解析
+    # （否则「撤回」会被建成任务）。原来是一串平铺 if，谁在前面谁优先；
+    # 现在优先级写进 _intercept 的表里，改顺序不用挪代码。
+    def _try_self_intro(self, text):
+        """「你是谁 / 介绍你自己」"""
         if core.SELF_RE.search(text or "") and len((text or "").strip()) <= 30:
             return self._intro_self()
+        return None
 
-        # ②b 给助手起名：「我希望你叫小宁同志」「你就叫小宁吧」
+    def _try_bot_name(self, text):
+        """给助手起名：「我希望你叫小宁同志」「你就叫小宁吧」"""
         m_bn = _BOT_NAME_RE.search(text or "")
-        if m_bn:
-            nm = (m_bn.group(1) or "").strip().strip("\"'“”‘’「」")
-            if nm:
-                nm = re.split(r"[，,。.!！?？；;\s]", nm)[0]
-                nm = re.sub(r"(就行|就好|好了|便好|得了|吧|哦|呀|啊|啦|哈)$", "", nm) or nm
-                self.store.bot_name = nm
-                self.store.save()
-                return tr("bot_name_ok", bot=nm)
+        if not m_bn:
+            return None
+        nm = (m_bn.group(1) or "").strip().strip("\"'“”‘’「」")
+        if not nm:
+            return None
+        nm = re.split(r"[，,。.!！?？；;\s]", nm)[0]
+        nm = re.sub(r"(就行|就好|好了|便好|得了|吧|哦|呀|啊|啦|哈)$", "", nm) or nm
+        self.store.bot_name = nm
+        self.store.save()
+        return tr("bot_name_ok", bot=nm)
 
-        # ②b2 改自己的昵称（v1.9.9.23）：引导阶段跳过取名后，任何时候
-        # 都能补设——「你叫我boss吧 / 以后叫我Alex / 我叫小李 /
-        # 我的名字是老王」。原来这类句子一律被当成新任务建出来。
+    def _try_user_name(self, text):
+        """改自己的昵称（v1.9.9.23）：跳过取名后也能随时补设"""
         m_un = _USER_NAME_RE.match((text or "").strip())
-        if m_un:
-            nm = (m_un.group(1) or "").strip().strip("\"'“”‘’「」")
-            if nm and nm not in ("我", "自己", "什么", "啥", "谁"):
-                old = getattr(self.store, "user_name", "") or ""
-                self.store.user_name = nm
-                self.store.save()
-                if old and old != nm:
-                    return tr("user_name_changed", old=old, name=nm)
-                return tr("name_ok", name=nm)
+        if not m_un:
+            return None
+        nm = (m_un.group(1) or "").strip().strip("\"'“”‘’「」")
+        if not nm or nm in ("我", "自己", "什么", "啥", "谁"):
+            return None
+        old = getattr(self.store, "user_name", "") or ""
+        self.store.user_name = nm
+        self.store.save()
+        if old and old != nm:
+            return tr("user_name_changed", old=old, name=nm)
+        return tr("name_ok", name=nm)
 
-        # ②c 撤回（v1.9.5）：元指令，优先级最高——必须早于所有追问路由，
-        #     否则「撤回」会被当成上一个问题的回答吃掉
-        _undo = self._match_undo(text)
-        if _undo:
-            return self._do_undo(_undo)
-        # v1.9.9：一句干巴巴的「撤回」如果没东西可撤，也要给个交代，
-        # 不能掉进解析器变成一条叫「撤回」的任务
+    def _try_undo(self, text):
+        """撤回：必须早于所有追问路由，否则会被当成上一个问题的回答"""
+        kind = self._match_undo(text)
+        if kind:
+            return self._do_undo(kind)
         if self._undo_re().match((text or "").strip()):
             return tr("undo_none")
+        return None
 
-        # ②d 便签指令（v1.9.7）：对话里直接「记便签：xxx」→ 存进便签页
+    def _try_note(self, text):
+        """便签指令：「记便签：xxx」→ 存进便签页"""
         m_note = re.match(r"^(?:记个?便签|便签|帮我记个?便签)[：:，,\s]\s*(.+)$",
                           (text or "").strip())
         if m_note and m_note.group(1).strip():
             self.add_note(m_note.group(1).strip()[:200])
-            return None          # add_note 已播报，避免重复消息
+            return _SILENT
+        return None
+
+    def _intercept(self, text):
+        """元指令拦截（有序表）。返回 (是否已处理, 回复)。
+
+        顺序即优先级，与代码位置无关：
+          引导 → 自我介绍 → 助手名 → 用户名 → 撤回 → 便签
+        「撤回」排在改名之后是有意的：改名句式很窄（必须以「你叫我/我叫」
+        开头），不会误吞「撤回」；而「撤回」泛用，放太后会抢走别的句式。
+        """
+        onboarding = self._onboarding(text)
+        if onboarding is not None:
+            return True, onboarding
+        for fn in (self._try_self_intro, self._try_bot_name,
+                   self._try_user_name, self._try_undo, self._try_note):
+            reply = fn(text)
+            if reply is not None:
+                return True, (None if reply is _SILENT else reply)
+        return False, None
+
+    def respond(self, text):
+        """生成回复，并处理任务增删"""
+        _hit, _rep = self._intercept(text)
+        if _hit:
+            return _rep
 
         # ⓪ 最新问题优先（v1.9.5）：同时挂着多个待答状态时，回答只送给最近问的那一个，
         #    避免「不用」被优先级/提醒等旧问题吃掉，导致错配（用户反馈的串线 bug）
