@@ -236,6 +236,12 @@ STRINGS = {
     # —— 右键菜单
     "menu_toggle": ("标记完成/未完成", "Toggle done"),
     "menu_edit": ("编辑内容", "Edit text"),
+    # v1.9.9.35：右键「修改时间」
+    "menu_time": ("修改时间", "Change time"),
+    "time_ask": ("【{t}】改成什么时间？", "New time for \"{t}\"?"),
+    "time_hint": ("如 21:30 / 晚上九点半 / 明天下午3点", "e.g. 21:30 / 9:30pm / 3pm tomorrow"),
+    "time_bad": ("没看懂「{s}」，再试一次如「21:30」或「明天下午3点」",
+                 "Didn't get \"{s}\" — try like 21:30 or 3pm tomorrow"),
     "menu_delete": ("删除", "Delete"),
 
     # —— 历史窗口
@@ -297,6 +303,7 @@ STRINGS = {
     "tray_notify_on": ("已打开：下次收进托盘时会再提示一次。",
                        "On — you'll get one bubble next time you minimize."),
     "tray_show": ("显示主窗口", "Show window"),
+    "quote_roll": ("换一句", "Another one"),
     "tray_quit": ("退出", "Quit"),
     # v1.9.9.23：托盘真的不可用（非 Windows / 初始化失败）时点 ✕ 的交代
     "tray_unavailable": ("系统托盘不可用，已退出。下次打开继续记。",
@@ -376,7 +383,20 @@ STRINGS = {
         "· run a stopwatch, countdown and calendar of what you did\n"
         "{name}, just say things like \"finish the report by 3pm tomorrow\".",
     ),
-    "intro_self_noname": ("我是{bot}，你的每日记事本助手。", "I'm {bot}, your daily-notes assistant."),
+    # v1.9.9.35：无名版也要带功能清单——用户实测反馈只回一句话，
+    # 功能和用法没人告诉
+    "intro_self_noname": (
+        "我是{bot}，你的每日记事本助手。可以做这些：\n"
+        "· 记任务并按重要性排序，完成在清单里打勾\n"
+        "· 识别截止时间和提醒，到点弹窗提醒你\n"
+        "· 有正计时、倒计时和日历，能看每天做了什么\n"
+        "直接说「明天下午三点前交报告」这种句子就行。",
+        "I'm {bot}, your daily-notes assistant. I can:\n"
+        "· capture tasks, rank them by importance, tick them off\n"
+        "· spot deadlines and remind you right on time\n"
+        "· run a stopwatch, countdown and calendar of what you did\n"
+        "Just say things like \"finish the report by 3pm tomorrow\".",
+    ),
     "intro_first": (
         "我是{bot}，你的每日记事本助手：\n"
         "· 记任务并按重要性排序，完成打勾\n"

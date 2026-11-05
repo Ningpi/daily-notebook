@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.34"
+VERSION = "1.9.9.35"
 
 
 # ----------------------------------------------------------------- 配色
@@ -1122,6 +1122,7 @@ class NoteApp(object):
         self.setup_window()
         self.setup_fonts()
         self.build_ui()
+        self._style_scrollbars()        # v1.9.9.35：滚动条主题配色
         self.refresh_tasks(scroll_top=True)
         self.render_messages()
         self.restore_quote()
@@ -1449,6 +1450,10 @@ class NoteApp(object):
         self.quote_lbl.pack(side="right", fill="x", expand=True)
         self.quote_row.bind("<Button-1>", lambda e: self.roll_quote(manual=True))
         self.quote_lbl.bind("<Button-1>", lambda e: self.roll_quote(manual=True))
+        # v1.9.9.35：右键哲言栏 = 找回主窗口。主窗收到托盘后没有任务栏
+        # 图标可点，这条右键是除托盘图标外的第二条找回路径
+        self.quote_row.bind("<Button-3>", lambda e: self._quote_bar_menu())
+        self.quote_lbl.bind("<Button-3>", lambda e: self._quote_bar_menu())
         self.quote_lbl.bind("<Enter>", lambda e: self.quote_lbl.config(fg=C.ACCENT))
         self.quote_lbl.bind("<Leave>", lambda e: self.quote_lbl.config(fg=C.SUB))
 
@@ -1532,8 +1537,8 @@ class NoteApp(object):
         self.list_mode = "task"          # task=待办 / note=便签
         self.chat_h = int(getattr(self.store, "chat_h", None) or 96)
         # v1.9.9.32：聊天区右侧滚动条（同待办区——拖一下直达旧消息）
-        self.chat_sb = tk.Scrollbar(self.chat_wrap, orient="vertical",
-                                    width=11, command=self._chat_scroll)
+        self.chat_sb = ttk.Scrollbar(self.chat_wrap, orient="vertical",
+                                     command=self._chat_scroll)
         self.chat_sb.pack(side="right", fill="y")
         self.chat_cv = Canvas(self.chat_wrap, height=self.chat_h)
         self.chat_cv.pack(side="top", fill="both")
@@ -1610,8 +1615,8 @@ class NoteApp(object):
         # v1.9.9.32：右侧可拖动滚动条——消息/任务一多，光靠滚轮一格一格
         # 挪太慢。先建画布对象（不布局），滚动条 pack 在右、画布 pack 占余下
         self.list_cv = Canvas(self.list_wrap)
-        self.list_sb = tk.Scrollbar(self.list_wrap, orient="vertical",
-                                    width=11, command=self.list_cv.yview)
+        self.list_sb = ttk.Scrollbar(self.list_wrap, orient="vertical",
+                                     command=self.list_cv.yview)
         self.list_sb.pack(side="right", fill="y")
         self.list_cv.pack(side="top", fill="both", expand=True)
         self.list_cv.configure(yscrollcommand=self.list_sb.set)
@@ -2011,6 +2016,25 @@ class NoteApp(object):
         self.diag("  %-22s %5d ms" % (label, int((time.time() - t0) * 1000)))
 
     # ---------------- 换肤
+    def _style_scrollbars(self):
+        """v1.9.9.35：滚动条跟随主题配色——滑块（可拖动件）颜色比底槽深，
+        悬停变主题强调色，一眼能认出「这里能拖」"""
+        try:
+            style = ttk.Style(self.root)
+            if style.theme_use() != "clam":
+                style.theme_use("clam")     # clam 才允许逐项配色
+            style.configure("Vertical.TScrollbar",
+                            background=C.LINE,          # 滑块：深一档
+                            troughcolor=C.BG,           # 底槽：背景色
+                            bordercolor=C.BG,
+                            arrowcolor=C.SUB,
+                            relief="flat")
+            style.map("Vertical.TScrollbar",
+                      background=[("active", C.ACCENT),
+                                  ("pressed", C.ACCENT)])
+        except Exception:
+            pass
+
     def apply_theme(self, theme_id, announce=True):
         self.diag("== apply_theme %s ==" % theme_id)
         try:
@@ -2019,6 +2043,7 @@ class NoteApp(object):
                                                   self.store.save()))
             # Tk 控件（非 Canvas）要显式刷色
             self.timed("tk控件刷色", lambda: self._recolor_widgets())
+            self.timed("滚动条刷色", self._style_scrollbars)
             # Canvas 重绘
             self.timed("draw_head", self.draw_head)
             self.timed("draw_bar", self.draw_bar)
@@ -2231,11 +2256,17 @@ class NoteApp(object):
             self.flash(q, 3600)
 
     def quote_on_complete(self, task, left):
-        """勾掉一项后：只报「任务完成」。哲言不再刷屏，只留在底部哲言栏。"""
+        """勾掉一项后：报「任务完成」。哲言只在今日全部完成时补一句
+        （v1.9.9.35：用户实测——全勾完了对话里却没哲言）"""
+        all_done = left <= 0
+        q = self.draw_quote() if all_done else None
+
         def _mk(lang):
             s = i18n.render("task_done_push", dict(title=task["title"]), lang)
-            if left <= 0:
+            if all_done:
                 s += " " + i18n.render("task_done_all", dict(n=len(self.store.tasks)), lang)
+                if q:
+                    s += "\n" + self.fmt_quote(q)
             return s
         self.push_dual("bot", _mk(i18n.get_lang()), _mk(
             "en" if i18n.get_lang() == "zh" else "zh"))
@@ -2360,9 +2391,21 @@ class NoteApp(object):
         except Exception:
             return (getattr(e, "x", 0), getattr(e, "y", 0))
 
+    def _over_scrollbar(self, e):
+        """v1.9.9.35：指针是否在滚动条上——滚动条贴着窗口右/下缘，
+        会被边缘缩放热区覆盖（光标变「调整大小」、点下去拉窗口），
+        必须先让位"""
+        w = getattr(e, "widget", None)
+        return isinstance(w, (tk.Scrollbar, ttk.Scrollbar))
+
     def _edge_cursor(self, e):
         """悬停在边缘 → 显示缩放光标（节流：值没变不刷）"""
         if getattr(self, "_edge", None):
+            return
+        if self._over_scrollbar(e):
+            # 滚动条区域还原本来的光标（上次悬停边缘可能残留缩放样式）
+            if self.root.cget("cursor") != "":
+                self.root.config(cursor="")
             return
         try:
             zone = self._edge_zone(*self._edge_xy(e))
@@ -2374,6 +2417,8 @@ class NoteApp(object):
 
     def _edge_probe(self, e):
         """按下：落在边缘则进入缩放模式（控件自己的 handler 照常执行）"""
+        if self._over_scrollbar(e):
+            return              # 点滚动条 = 滚动，不是拉窗口
         zone = self._edge_zone(*self._edge_xy(e))
         if not zone:
             return
@@ -3770,6 +3815,7 @@ class NoteApp(object):
         """透明度变化后的轻量重刷（不动主题、不重建气泡）"""
         try:
             self._recolor_widgets()
+            self._style_scrollbars()
             self.draw_head()
             self.draw_bar()
             self.render_messages()
@@ -4568,6 +4614,29 @@ class NoteApp(object):
     # ---------------- 其余任务操作（v1.9.9.29 重构）
     # 改时间 / 删除 / 寒暄。原来是一串平铺 if，现在拆成三个方法，
     # 由 _handle_task_ops 按顺序试——顺序即优先级，与代码位置无关。
+    def _apply_new_time(self, task, when):
+        """v1.9.9.35：把「新时间」写进任务（对话改时间和右键菜单共用）。
+        成功返回新的 deadline_txt；听不懂返回 None"""
+        _t = (core.find_times(when) or [None])[0]
+        if not _t:
+            return None
+        _d = core.find_deadline_date(when)
+        task["hhmm"] = _t[0]
+        task["due_date"] = (_d[0].isoformat() if _d and _d[0]
+                            else task.get("due_date"))
+        task["deadline_txt"] = (task["due_date"] and
+                                "%s %s" % (
+                                    "%d月%d日" % (int(task["due_date"][5:7]),
+                                                 int(task["due_date"][8:10])),
+                                    _t[0])) or _t[0]
+        task["_from_raw"] = False
+        task["reminded"] = False        # 时间变了，旧提醒作废
+        task["reminded_day"] = None
+        self._push_undo({"kind": "deadline", "id": task["id"]})
+        self.store.save()
+        self.refresh_tasks()
+        return task["deadline_txt"]
+
     def _op_reschedule(self, text, parsed, pz):
         """改时间：「把开会改到下午4点」「开会改成明天3点」"""
         m_adj = re.match(r"^[\s，,]*(?:帮我|请)?(?:把|将)?\s*(.+?)\s*"
@@ -4579,23 +4648,10 @@ class NoteApp(object):
         for task in self.store.tasks:
             if not self._match(name, task["title"]):
                 continue
-            _t = (core.find_times(when) or [None])[0]
-            if not _t:
+            dl = self._apply_new_time(task, when)
+            if dl is None:
                 break
-            _d = core.find_deadline_date(when)
-            task["hhmm"] = _t[0]
-            task["due_date"] = (_d[0].isoformat() if _d and _d[0]
-                               else task.get("due_date"))
-            task["deadline_txt"] = (task["due_date"] and
-                                    "%s %s" % (
-                                        "%d月%d日" % (int(task["due_date"][5:7]),
-                                                     int(task["due_date"][8:10])),
-                                        _t[0])) or _t[0]
-            task["_from_raw"] = False
-            self._push_undo({"kind": "deadline", "id": task["id"]})
-            self.store.save()
-            self.refresh_tasks()
-            return True, tr("dl_set", t=task["title"], d=task["deadline_txt"])
+            return True, tr("dl_set", t=task["title"], d=dl)
         return False, None
 
     def _op_delete(self, text, parsed, pz):
@@ -5479,6 +5535,16 @@ class NoteApp(object):
         except Exception:
             pass
 
+    def _quote_bar_menu(self):
+        """v1.9.9.35：哲言栏右键菜单——显示主窗口 / 换一句"""
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(label=tr("tray_show"), command=self.restore_from_tray)
+        m.add_command(label=tr("quote_roll"), command=lambda: self.roll_quote(manual=True))
+        try:
+            m.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
+        finally:
+            m.grab_release()
+
     def restore_from_tray(self):
         """托盘图标单击 → 还原窗口"""
         self._tray_hidden = False
@@ -5943,6 +6009,9 @@ class NoteApp(object):
         # 显式入口：就地编辑任务内容（v1.9.5）
         m.add_command(label=tr("menu_edit"),
                       command=lambda: self._menu_edit(tid))
+        # v1.9.9.35：修改截止时间——内容能改、时间也必须能改
+        m.add_command(label=tr("menu_time"),
+                      command=lambda: self._menu_time(tid))
         # 手动调整优先级
         sub = tk.Menu(m, tearoff=0)
         for lv in (4, 3, 2, 1):
@@ -5960,6 +6029,30 @@ class NoteApp(object):
             m.tk_popup(e.x_root, e.y_root)
         finally:
             m.grab_release()
+
+    def _menu_time(self, tid):
+        """v1.9.9.35：右键「修改时间」——弹输入框，自然语言解析
+        （「21:30」「晚上9点半」「明天下午3点」都行）"""
+        from tkinter import simpledialog
+        task = None
+        for t in self.store.tasks:
+            if t.get("id") == tid:
+                task = t
+                break
+        if task is None:
+            return
+        cur = task.get("hhmm") or ""
+        when = simpledialog.askstring(
+            tr("menu_time"),
+            tr("time_ask", t=task["title"]) + "\n" + tr("time_hint"),
+            initialvalue=cur, parent=self.root)
+        if not when or not when.strip():
+            return
+        dl = self._apply_new_time(task, when.strip())
+        if dl is None:
+            self.flash(tr("time_bad", s=when.strip()))
+        else:
+            self.flash(tr("dl_set", t=task["title"], d=dl))
 
     def _menu_edit(self, tid):
         """右键「编辑内容」：定位到该行并打开行内编辑框"""
@@ -7185,20 +7278,19 @@ class NoteApp(object):
                 busy.add(dd)
             if t.get("day"):
                 busy.add(t["day"])
-        # 重复任务：把未来 60 天内命中的日期都标上（每天/每周X）
-        # v1.9.9.32：repeat 现在是 dict（{"kind":...}），旧代码
-        # `(rep or "").find("每")` 直接 AttributeError，整个日历崩成空白
-        _rep_tasks = [t for t in self.store.tasks if t.get("repeat")]
-        if _rep_tasks:
-            _start = dt.date.today()
-            for _i in range(60):
-                _d = _start + dt.timedelta(days=_i)
-                for _t in _rep_tasks:
-                    if _t.get("day") and _t["day"] > _d.isoformat():
-                        continue      # 还没创建的任务不外推
-                    if self._daily_due_today(_t, _d):
-                        busy.add(_d.isoformat())
-                        break
+        first0 = dt.date(y, m, 1)
+        ndays0 = (dt.date(y + (m == 12), (m % 12) + 1, 1) - first0).days
+        # v1.9.9.35：圆点改为**按显示的月份**整月计算——原来的
+        # 「未来 60 天」上限是随便定的，2027 年 1 月就断档了
+        for _i in range(ndays0):
+            _d = first0 + dt.timedelta(days=_i)
+            if _d.isoformat() in busy:
+                continue
+            for _t in self.store.tasks:
+                if _t.get("repeat") and (_t.get("day") or "") <= _d.isoformat() \
+                        and self._daily_due_today(_t, _d):
+                    busy.add(_d.isoformat())
+                    break
         # 今天的日常若已全部打卡，圆点改成空心（○ = 还没打卡，● = 打完了）
         try:
             _n, _dn, _tmp = self._daily_counts()
@@ -7242,13 +7334,15 @@ class NoteApp(object):
                 cv.create_text(x0 + cw / 2, y0 + 44, text=fest,
                                font=self.f_tiny, fill="#EE9A2B", tags=(tag,))
             # 有日程：小圆点（今天日常全部打完 → 空心圈，表示「已完成打卡」）
+            # v1.9.9.35：圆点缩到 r=2.5 并压到格子底部——原来 r=3、
+            # y0+ch-14 会压到节日名称（「元旦」和圆点叠在一起）
             if ds in busy:
-                _x, _y0, _y1 = x0 + cw / 2, y0 + ch - 14, y0 + ch - 8
+                _x, _yc = x0 + cw / 2, y0 + ch - 9
                 if ds in daily_all_done:
-                    cv.create_oval(_x - 3, _y0, _x + 3, _y1,
+                    cv.create_oval(_x - 2.5, _yc - 2.5, _x + 2.5, _yc + 2.5,
                                    outline=C_DAILY, width=1.4, tags=(tag,))
                 else:
-                    cv.create_oval(_x - 3, _y0, _x + 3, _y1,
+                    cv.create_oval(_x - 2.5, _yc - 2.5, _x + 2.5, _yc + 2.5,
                                    fill=C_DAILY if ds == today_s else C.ACCENT,
                                    outline="", tags=(tag,))
             # 点击日期 -> 底部显示当天安排
@@ -7380,12 +7474,14 @@ class NoteApp(object):
         if items:
             done = sum(1 for t in items if t.get("done"))
             parts.append(tr("cal_day_tasks", n=len(items), d=done))
-            for t in items[:3]:
+            # v1.9.9.35：原来只列前 3 件——4 件任务永远显示 3 件，
+            # 用户以为漏了。放宽到 6 件（再多挤不下一行，以计数为准）
+            for t in items[:6]:
                 mark = "✓" if t.get("done") else "·"
                 parts.append("  %s %s" % (mark, t["title"]))
         else:
             parts.append(tr("cal_day_empty"))
-        self._cal_info.config(text="   ".join(parts[:7]))
+        self._cal_info.config(text="   ".join(parts[:10]))
 
     def open_history(self):
         self.store.sync_history()
