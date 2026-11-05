@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.30"
+VERSION = "1.9.9.31"
 
 
 # ----------------------------------------------------------------- 配色
@@ -4449,6 +4449,11 @@ class NoteApp(object):
         软完成语：「X打卡了 / 做了X」——动词太泛，必须额外校验。"""
         if len(text or "") > 24:
             return False, False
+        # v1.9.9.31：「完成数学作业，每天晚上八点」里的「完成」是**建任务**的
+        # 动词不是打卡——句子里带重复信号（每天/每周/工作日）时
+        # 绝不按完成语处理，交给建任务流程
+        if re.search(r"每[天周月日]|工作日|礼拜[一二三四五六日天]|天天", text or ""):
+            return False, False
         soft = bool(re.search(r"(打个?卡|打卡|签到|签个到)", text or "")) or \
             bool(re.match(r"^[\s，,]*(?:我)?(?:今天|刚刚|已经)?\s*"
                           r"(?:做|弄|搞|看|读|背|学|练|写|听|跑)(?:了|过|完)", text or ""))
@@ -7028,6 +7033,10 @@ class NoteApp(object):
                                   font=self.f_tiny, anchor="w", justify="left")
         self._cal_info.pack(side="bottom", fill="x", padx=10, pady=(0, 6))
         self._draw_calendar()
+        # v1.9.9.31：首次打开就显示今天的安排（用户不必先点一下日期）。
+        # 只有当底部面板还是空的时候才填，避免覆盖用户刚点选的日期
+        if not self._cal_info.cget("text"):
+            self._cal_show_day(dt.date.today().isoformat())
 
     def _cal_jump(self):
         try:

@@ -171,3 +171,50 @@ class TestIntentTable:
         r = a.respond("完成一个根本不存在的东西")
         assert not a.store.tasks
         assert "没找到" in (r or ""), r
+
+
+class TestV199931DailyPhrasing:
+    """v1.9.9.31：日常任务的自然说法
+
+    用户原话：「如果我输入的是完成数学作业，每天晚上八点。
+    这样的话，明天它还会在待办中吗？」
+    """
+
+    # ---- 解析层：「完成X，每天晚上八点」是一个任务，不是两个
+    def test_bare_repeat_merges_into_previous(self):
+        import parser
+        r = parser.parse_tasks("背单词，每天晚上八点")
+        assert len(r) == 1, r
+        assert r[0][0] == "背单词"
+        assert r[0][1] == "20:00"
+        assert r[0][5] and r[0][5]["kind"] == "daily"
+
+    def test_verb_then_daily_schedule(self):
+        import parser
+        r = parser.parse_tasks("完成数学作业，每天晚上八点")
+        assert len(r) == 1, r
+        assert r[0][0] == "完成数学作业"
+        assert r[0][1] == "20:00"
+        assert r[0][5]["kind"] == "daily"
+
+    # ---- 意图层：「完成」+重复信号是建任务，不是打卡
+    def test_complete_with_repeat_creates_task(self, app):
+        a = _fresh(app)
+        a.respond("完成数学作业，每天晚上八点")
+        titles = [t["title"] for t in a.store.tasks]
+        assert titles == ["完成数学作业"], titles
+        t = a.store.tasks[0]
+        assert t.get("repeat", {}).get("kind") == "daily"
+        assert t.get("hhmm") == "20:00"
+
+    def test_daily_task_survives_to_tomorrow(self, app):
+        """建了日常任务后，次日它仍然在待办里（且未打卡）"""
+        import datetime as _dt
+        a = _fresh(app)
+        a.respond("完成数学作业，每天晚上八点")
+        t = a.store.tasks[0]
+        t["done"] = True              # 今天打完了
+        t["done_day"] = a.store._today()
+        tomorrow = (_dt.date.today() + _dt.timedelta(days=1)).isoformat()
+        a.store._roll_day(tomorrow)
+        assert a.store.tasks[0]["done"] is False, "第二天应重新变成待办"

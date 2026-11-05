@@ -1333,7 +1333,12 @@ def parse_tasks(text, fallback=True):
                 _t_hits.append(_mh.group(0))
         title = clean_title(seg, _t_hits + _hit_extra +
                             [r for r in (dur_raw, due_raw) if r])
-        if _is_noise(title):
+        # v1.9.9.30：整段只剩重复词（「每天」「每周三」）+ 时间，
+        # 没有事项本体——是给上一条补「每天几点做」的，不是新任务。
+        _bare_rep = (find_repeat(seg) is not None and re.fullmatch(
+            r"每[天日周月]?[一二三四五六日天末]?[一二三四五六日天末0-9]*[号]?",
+            title or "") is not None)
+        if _is_noise(title) or _bare_rep:
             # v1.9.9.18：这一段自带明确时间/日期，说明它是独立的一件事
             # （「凌晨两点睡，早上七点起」的后半句），不该并进上一条
             # P2 问题8（v1.9.9.22）：但纯时间（「开会 晚上8点」的
@@ -1346,7 +1351,7 @@ def parse_tasks(text, fallback=True):
             # 剩余汉字 ≤ 2 且属于「交/做/完成/给」这类补语动词。
             _verb_tail = (_cn_left <= 2 and re.fullmatch(
                 r"[交做给发写完成为办好弄好备用]", title or ""))
-            if prev is not None and _verb_tail:
+            if prev is not None and (_verb_tail or _bare_rep):
                 prev_t = results[prev]
                 _s_times = find_times(seg)
                 _s_h = _s_times[0][0] if _s_times else None
@@ -1356,7 +1361,10 @@ def parse_tasks(text, fallback=True):
                                  score_task(prev_t[0], raw_new,
                                             prev_t[1] or _s_h),
                                  raw_new, prev_t[4],
-                                 prev_t[5] if len(prev_t) > 5 else None,
+                                 # v1.9.9.30：「背单词，每天晚上八点」的
+                                 # repeat 要跟时间一起并进前一条
+                                 (prev_t[5] if len(prev_t) > 5 else None)
+                                 or find_repeat(seg),
                                  _s_due or (prev_t[6] if len(prev_t) > 6 else None))
                 continue
             if prev is not None and _cn_left >= 1 and (find_times(seg) or find_deadline_date(seg)[0]):
