@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.35"
+VERSION = "1.9.9.36"
 
 
 # ----------------------------------------------------------------- 配色
@@ -1624,6 +1624,12 @@ class NoteApp(object):
         self.list_cv.bind("<MouseWheel>", self.on_list_wheel)
         self.list_cv.bind("<Button-4>", lambda e: self.on_list_wheel(e, -1))
         self.list_cv.bind("<Button-5>", lambda e: self.on_list_wheel(e, 1))
+
+        # v1.9.9.36：滚轮全局路由——原来只绑在两块画布上，指针一放到
+        # 滚动条/标题栏/底栏上滚轮就「没反应」。bind_all 统一收，
+        # 自带绑定的画布跳过（避免一次滚动走两个 handler 加倍）
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.root.bind_all(seq, self._wheel_route, add="+")
 
         # v1.9.9.2 关键修复：这里必须 add="+"。之前直接覆盖，把上面刚注册的
         # _edge_probe/_edge_motion/_edge_up/_edge_cursor 四个缩放绑定全部抹掉，
@@ -5621,6 +5627,11 @@ class NoteApp(object):
             if getattr(self, "_daily_streak", None):
                 self.flash(tr("daily_checked", t=task["title"]))
                 self._daily_streak = None
+                # v1.9.9.36：日常打卡也要看「今日是否全部完成」——
+                # 原来直接 return，最后一件是日常时哲言永远不弹
+                left = len([x for x in self.store.tasks if not x.get("done")])
+                if left == 0:
+                    self.quote_on_complete(task, 0)
                 return
             left = len([x for x in self.store.tasks if not x.get("done")])
             q = self.quote_on_complete(task, left)
@@ -6116,6 +6127,44 @@ class NoteApp(object):
         if direction is None:
             direction = -1 if getattr(e, "delta", 0) > 0 else 1
         self.list_cv.yview_scroll(direction, "units")
+
+    def _wheel_route(self, e):
+        """v1.9.9.36：滚轮路由（bind_all）。规则：
+        · 两块画布自己已绑定 → 跳过（否则一次滚动走两个 handler）
+        · 输入框/文本/滑块 → 交给控件自己
+        · 滚动条上 → 转发给对应画布
+        · 其余区域 → 离谁近滚谁"""
+        num = getattr(e, "num", 0)
+        if num == 4:
+            d = -1
+        elif num == 5:
+            d = 1
+        else:
+            d = None
+        try:
+            w = self.root.winfo_containing(e.x_root, e.y_root)
+        except Exception:
+            return
+        if w is None:
+            return
+        if w in (self.chat_cv, self.list_cv):
+            return                          # 画布自己的 handler 会触发
+        if isinstance(w, (tk.Entry, tk.Text, tk.Scale, tk.Spinbox, tk.Listbox)):
+            return                          # 这些控件滚轮有原生含义
+        if isinstance(w, (tk.Scrollbar, ttk.Scrollbar)):
+            if w is getattr(self, "chat_sb", None):
+                self.on_chat_wheel(e, d)
+            elif w is getattr(self, "list_sb", None):
+                self.on_list_wheel(e, d)
+            return
+        try:
+            bottom = self.chat_cv.winfo_rooty() + self.chat_cv.winfo_height()
+        except Exception:
+            bottom = e.y_root
+        if e.y_root < bottom:
+            self.on_chat_wheel(e, d)
+        else:
+            self.on_list_wheel(e, d)
 
     # ---------------- 历史窗口
     # ---------------- 时钟 / 正计时 / 倒计时（v1.3.8）
