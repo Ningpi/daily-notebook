@@ -4393,6 +4393,48 @@ class NoteApp(object):
         self._pending_remind = None    # 不是回答，按普通输入处理
         return False, None
 
+    # ---------------- 查询类意图（v1.9.9.29 重构）
+    # 三个只读意图，必须早于任务解析（否则「列表」会被建成任务）。
+    # 原来写成三段平铺 if，现在集中到 _handle_query 按顺序试。
+    def _q_list(self, text, parsed, pz):
+        """「列表 / 我的任务 / 今天有什么任务」→ 播报未完成 Top5"""
+        if not self._is_list_query(text):
+            return None
+        return self._list_report()
+
+    def _q_done_today(self, text, parsed, pz):
+        """「今天做了什么」→ 播报今天勾掉的任务（v1.9.9.28）"""
+        if not re.fullmatch(r"[\s，,]*(?:今天|今日)(?:都)?(?:做了|干了|完成了|做完|搞定了?)"
+                            r"(?:些)?(?:什么|啥|哪些)(?:事|活|活儿|任务)?(?:呢|吗|？|\?)?"
+                            r"[\s。.！!～~]*", text or ""):
+            return None
+        rows = [r for r in (self.store.history.get(self.store._today()) or [])
+                if r.get("done")]
+        if not rows:
+            return tr("done_today_none")
+        lines = "\n".join("  · %s%s" % (r.get("title") or "",
+                                        (" " + r["at"]) if r.get("at") else "")
+                          for r in rows[:8])
+        return tr("done_today_report", n=len(rows), lines=lines)
+
+    def _q_progress(self, text, parsed, pz):
+        """「我还有几件 / 完成多少」→ 剩余数量 + 最要紧的一件"""
+        if not (pz.QUERY_RE.search(text) and not parsed):
+            return None
+        left = [x for x in self.store.tasks if not x.get("done")]
+        if not left:
+            return tr("left_none")
+        top = sorted(left, key=lambda x: -x.get("score", 0))[0]
+        return tr("left_some", n=len(left), title=top["title"])
+
+    def _handle_query(self, text, parsed, pz):
+        """按顺序试各查询意图，返回 (handled, reply)"""
+        for fn in (self._q_list, self._q_done_today, self._q_progress):
+            r = fn(text, parsed, pz)
+            if r is not None:
+                return True, r
+        return False, None
+
     def respond(self, text):
         """生成回复，并处理任务增删"""
         _hit, _rep = self._intercept(text)
@@ -4457,32 +4499,10 @@ class NoteApp(object):
             pz = core
         parsed_now = pz.parse_tasks(text)
 
-        # 对话查列表（v1.9.9.25，P0-5）：用户说「列表 / 我的任务 /
-        # 今天有什么任务」时播报未完成 Top5。原来这些都被建成任务。
-        if self._is_list_query(text):
-            return self._list_report()
-
-        # v1.9.9.28：问「今天做了什么」→ 播报今天勾掉的任务。
-        # 原来这句会被建成一条叫「做了什么」的任务。
-        if re.fullmatch(r"[\s，,]*(?:今天|今日)(?:都)?(?:做了|干了|完成了|做完|搞定了?)"
-                        r"(?:些)?(?:什么|啥|哪些)(?:事|活|活儿|任务)?(?:呢|吗|？|\?)?"
-                        r"[\s。.！!～~]*", text or ""):
-            rows = [r for r in (self.store.history.get(self.store._today()) or [])
-                    if r.get("done")]
-            if not rows:
-                return tr("done_today_none")
-            lines = "\n".join("  · %s%s" % (r.get("title") or "",
-                                            (" " + r["at"]) if r.get("at") else "")
-                              for r in rows[:8])
-            return tr("done_today_report", n=len(rows), lines=lines)
-
-        # 查询进度
-        if pz.QUERY_RE.search(text) and not parsed_now:
-            left = [x for x in self.store.tasks if not x.get("done")]
-            if not left:
-                return tr("left_none")
-            top = sorted(left, key=lambda x: -x.get("score", 0))[0]
-            return tr("left_some", n=len(left), title=top["title"])
+        # 查询类意图：列表 / 今日完成 / 进度（只读，必须早于任务解析）
+        _hit, _rep = self._handle_query(text, parsed_now, pz)
+        if _hit:
+            return _rep
 
         # 勾选意图（v1.9.9.25 全面扩语序，P0-4）
         # 支持：「完成/完成了/做完/做完了/搞定/搞定了/做好 + 任务名」
