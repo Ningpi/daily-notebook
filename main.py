@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.32"
+VERSION = "1.9.9.33"
 
 
 # ----------------------------------------------------------------- 配色
@@ -3612,7 +3612,8 @@ class NoteApp(object):
         inner = tk.Frame(p, bg=C.BG)
         inner.pack(fill="both", expand=True, padx=1, pady=1)
         tk.Label(inner, text=tr("alpha_title"), bg=C.BG, fg=C.TEXT,
-                 font=self.f_small).pack(anchor="w", padx=10, pady=(6, 0))
+                 font=self.f_small, wraplength=190
+                 ).pack(anchor="w", padx=10, pady=(6, 0))
         row = tk.Frame(inner, bg=C.BG)
         row.pack(fill="x", padx=10, pady=(2, 8))
         val = tk.Label(row, text="", bg=C.BG, fg=C.ACCENT, font=self.f_small,
@@ -3658,7 +3659,7 @@ class NoteApp(object):
 
         # —— 字体大小滑块（80%~130%） ——
         tk.Label(inner, text=tr("font_size"), bg=C.BG, fg=C.TEXT,
-                 font=self.f_small).pack(anchor="w", padx=10)
+                 font=self.f_small, wraplength=190).pack(anchor="w", padx=10)
         frow = tk.Frame(inner, bg=C.BG)
         frow.pack(fill="x", padx=10, pady=(2, 4))
         fval = tk.Label(frow, text="", bg=C.BG, fg=C.ACCENT, font=self.f_small,
@@ -3685,7 +3686,7 @@ class NoteApp(object):
 
         # —— 字体深浅滑块（0~100%，拖过即接管自动推导） ——
         tk.Label(inner, text=tr("text_dark"), bg=C.BG, fg=C.TEXT,
-                 font=self.f_small).pack(anchor="w", padx=10)
+                 font=self.f_small, wraplength=190).pack(anchor="w", padx=10)
         drow = tk.Frame(inner, bg=C.BG)
         drow.pack(fill="x", padx=10, pady=(2, 8))
         dval = tk.Label(drow, text="", bg=C.BG, fg=C.ACCENT, font=self.f_small,
@@ -6369,9 +6370,13 @@ class NoteApp(object):
         self.store.save()
         self.refresh_tasks()
         self.push_dual("bot", _sw(lg), _sw("en" if lg == "zh" else "zh"))
-        q = self.draw_quote()
-        if q:
-            self.push("bot", self.fmt_quote(q))
+        # v1.9.9.33：与中文版口径统一——哲言不再每完成一件就发，
+        # 今日任务全部完成才补一句（英文版实测反馈）
+        left = len([x for x in self.store.tasks if not x.get("done")])
+        if left == 0:
+            q = self.draw_quote()
+            if q:
+                self.push("bot", self.fmt_quote(q))
 
     def _sw_reset(self):
         self._sw_running = False

@@ -122,7 +122,7 @@ STRINGS = {
     "cal_day_tasks": ("共 {n} 件（已完成 {d}）", "{n} tasks ({d} done)"),
     "cal_day_empty": ("这天没有安排", "Nothing scheduled"),
     "alpha_btn": ("透明度", "Opacity"),
-    "alpha_title": ("透明度：拖到左边更透，右边更实", "Opacity — drag left to see through"),
+    "alpha_title": ("透明度：拖到左边更透，右边更实", "Opacity (drag left)"),
     "cal_title": ("日历 · 每日记事本", "Calendar · Daily Note"),
     "ask_remind_short": ("需要我提前多久提醒？{opts}",
                          "Remind you early? {opts}"),
