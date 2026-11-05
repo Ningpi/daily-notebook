@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.33"
+VERSION = "1.9.9.34"
 
 
 # ----------------------------------------------------------------- 配色
@@ -226,6 +226,9 @@ class Store(object):
                 self.setup_stage = 3
             # v1.9.9.21：「回车发送」提示只需教一次，之后启动不再出现
             self.enter_hint_done = bool(obj.get("enter_hint_done", False))
+            # v1.9.9.34：托盘后台气泡状态
+            self.tray_notify_shown = bool(obj.get("tray_notify_shown", False))
+            self.tray_notify_off = bool(obj.get("tray_notify_off", False))
             for k in ("zh", "en"):
                 self.quotes.setdefault(k, {"last": "", "recent": []})
             saved_day = obj.get("date", self._today())
@@ -315,6 +318,9 @@ class Store(object):
             "font_scale": round(float(getattr(self, "font_scale", 1.0) or 1.0), 2),
             "text_darken": getattr(self, "text_darken", None),
             "enter_hint_done": bool(getattr(self, "enter_hint_done", False)),
+            # v1.9.9.34：托盘后台气泡（首次最小化只弹一次 + 用户可关）
+            "tray_notify_shown": bool(getattr(self, "tray_notify_shown", False)),
+            "tray_notify_off": bool(getattr(self, "tray_notify_off", False)),
         }
         self._atomic(self.path, obj)
         # v1.9.9.20：每天首次保存做一次快照，保留最近 7 天
@@ -4315,6 +4321,23 @@ class NoteApp(object):
             return tr("undo_none")
         return None
 
+    def _try_tray_pref(self, text):
+        """v1.9.9.34：「关闭/打开托盘气泡提示」——后台气泡每次最小化都弹，
+        用户嫌吵，要一个能关掉的开关"""
+        t = (text or "").strip()
+        if len(t) > 20:
+            return None
+        if re.search(r"(关闭|别再|不要|取消|关掉)(弹)?(托盘)?(气泡|通知|提示)", t):
+            self.store.tray_notify_off = True
+            self.store.save()
+            return tr("tray_notify_off")
+        if re.search(r"(打开|开启|恢复|要)(弹)?(托盘)?(气泡|通知|提示)", t):
+            self.store.tray_notify_off = False
+            self.store.tray_notify_shown = False
+            self.store.save()
+            return tr("tray_notify_on")
+        return None
+
     def _try_note(self, text):
         """便签指令：「记便签：xxx」→ 存进便签页"""
         m_note = re.match(r"^(?:记个?便签|便签|帮我记个?便签)[：:，,\s]\s*(.+)$",
@@ -4336,7 +4359,8 @@ class NoteApp(object):
         if onboarding is not None:
             return True, onboarding
         for fn in (self._try_self_intro, self._try_bot_name,
-                   self._try_user_name, self._try_undo, self._try_note):
+                   self._try_user_name, self._try_tray_pref,
+                   self._try_undo, self._try_note):
             reply = fn(text)
             if reply is not None:
                 return True, (None if reply is _SILENT else reply)
@@ -5443,8 +5467,15 @@ class NoteApp(object):
             pass
         self._tray_hidden = True
         self.push("bot", tr("to_tray"))
+        # v1.9.9.34：气泡只弹**第一次**（用户反馈：每次都弹影响观感，
+        # 但系统气泡没有按钮可点「已知晓」）；之后想再开/关走托盘
+        # 右键菜单或对话「关闭托盘提示」
         try:
-            self._tray.notify(self.app_name(), tr("to_tray_notify"))
+            if (not getattr(self.store, "tray_notify_off", False)
+                    and not getattr(self.store, "tray_notify_shown", False)):
+                self._tray.notify(self.app_name(), tr("to_tray_notify"))
+                self.store.tray_notify_shown = True
+                self.store.save()
         except Exception:
             pass
 
@@ -5469,12 +5500,28 @@ class NoteApp(object):
                           command=lambda: (self.restore_from_tray(),
                                            self._focus_entry()))
             m.add_command(label=tr("tray_show"), command=self.restore_from_tray)
+            # v1.9.9.34：后台气泡开关（默认只弹一次，可在这里永久关/开）。
+            # 用动态标签而不是 checkbutton——Menu 变量在 overrideredirect
+            # 场景下状态同步麻烦，文字写明「开/关」更直白
+            m.add_command(
+                label=tr("tray_menu_notify",
+                         st=tr("state_off") if getattr(self.store, "tray_notify_off", False)
+                         else tr("state_on")),
+                command=self._toggle_tray_notify)
             m.add_separator()
             m.add_command(label=tr("tray_quit"), command=self.quit)
             m.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
             m.grab_release()
         except Exception:
             pass
+
+    def _toggle_tray_notify(self):
+        """v1.9.9.34：托盘右键菜单里的气泡开关"""
+        self.store.tray_notify_off = not getattr(self.store, "tray_notify_off",
+                                                 False)
+        if not self.store.tray_notify_off:
+            self.store.tray_notify_shown = False    # 重新打开 → 下次再弹一次
+        self.store.save()
 
     def toggle_done(self, tid):
         changed = False

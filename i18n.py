@@ -288,6 +288,14 @@ STRINGS = {
                 "Minimized to tray — reminders still work. Click the tray icon to reopen."),
     "to_tray_notify": ("在后台继续守着你的提醒，点图标可打开。",
                        "Still watching your reminders. Click the icon to open."),
+    # v1.9.9.34：托盘气泡只弹一次；开关入口在右键菜单/对话
+    "tray_menu_notify": ("后台气泡提示：{st}", "Tray bubble: {st}"),
+    "state_on": ("开", "on"),
+    "state_off": ("关", "off"),
+    "tray_notify_off": ("好的，后台气泡不再弹了。想开回来说「打开托盘提示」或用托盘右键菜单。",
+                        "OK — no more tray bubbles. Say \"open tray notification\" or use the tray menu to turn it back on."),
+    "tray_notify_on": ("已打开：下次收进托盘时会再提示一次。",
+                       "On — you'll get one bubble next time you minimize."),
     "tray_show": ("显示主窗口", "Show window"),
     "tray_quit": ("退出", "Quit"),
     # v1.9.9.23：托盘真的不可用（非 Windows / 初始化失败）时点 ✕ 的交代

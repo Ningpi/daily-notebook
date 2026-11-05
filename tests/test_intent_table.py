@@ -300,3 +300,41 @@ class TestV199932UserAudit:
                           ("每个月5号交房租", "交房租")]:
             got = parser.parse_tasks(src)[0][0]
             assert got == want, "%s -> %s" % (src, got)
+
+
+class TestV199934TrayNotify:
+    """v1.9.9.34：托盘后台气泡只弹一次，可关/开"""
+
+    def test_first_minimize_notifies_once(self, app):
+        a = _fresh(app)
+        calls = []
+        class _Tray:
+            def notify(self, t, s):
+                calls.append(s); return True
+        a._tray = _Tray()
+        a.store.tray_notify_shown = False
+        a.hide_to_tray()
+        a.hide_to_tray()
+        a.hide_to_tray()
+        assert len(calls) == 1, calls          # 只弹第一次
+        assert a.store.tray_notify_shown is True
+
+    def test_chat_can_disable(self, app):
+        a = _fresh(app)
+        r = a.respond("关闭托盘提示")
+        assert a.store.tray_notify_off is True
+        calls = []
+        class _Tray:
+            def notify(self, t, s):
+                calls.append(s); return True
+        a._tray = _Tray()
+        a.hide_to_tray()
+        assert not calls                        # 关了就不再弹
+        assert "气泡" in (r or ""), r
+
+    def test_chat_can_reenable(self, app):
+        a = _fresh(app)
+        a.store.tray_notify_off = True
+        a.respond("打开托盘提示")
+        assert a.store.tray_notify_off is False
+        assert a.store.tray_notify_shown is False   # 重开后允许再弹一次
