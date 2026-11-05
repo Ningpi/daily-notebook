@@ -4607,62 +4607,89 @@ class NoteApp(object):
                 return True, rep
         return False, None
 
+    # ---------------- 待答状态总入口（v1.9.9.29 重构）
+    #
+    # 用户上一轮被问了一个问题，这一轮的输入可能是在回答它，也可能是
+    # 一件新事情。区别就在于处理器能不能「认领」这句输入：
+    #   handled=True  → 是回答，直接用 reply
+    #   handled=False → 不是回答，放行给任务解析
+    #
+    # 顺序即优先级（原来靠代码位置）：
+    #   meridiem（上下午）→ expired（过期确认）→ remind（提前多久）
+    #   → pri（优先级/截止）→ dup（重名确认）
+    def _ans_meridiem(self, text):
+        if getattr(self, "_pending_q", None) != "meridiem":
+            return False, None
+        if not getattr(self, "_pending_meridiem", None):
+            return False, None
+        ans = self._resolve_meridiem(text)
+        return (True, ans) if ans is not None else (False, None)
+
+    def _ans_expired(self, text):
+        if not getattr(self, "_pending_expired", None):
+            return False, None
+        ans = self._resolve_expired(text)
+        return (True, ans) if ans is not None else (False, None)
+
+    def _ans_dup(self, text):
+        pd = getattr(self, "_pending_dup", None)
+        if not pd:
+            return False, None
+        self._pending_dup = None
+        if self._dup_ok_re().search(text):
+            self._add_single(pd["title"], pd["hhmm"], pd["score"],
+                             pd["dur"], override=pd["new_title"])
+            return True, tr("dup_added", title=pd["new_title"])
+        # 其他回答：放弃确认，按普通输入继续解析
+        return False, None
+
+    def _handle_pending(self, text):
+        """返回 (handled, reply)。会顺带改写 _turn_text（pri 回答后剩下的部分）。"""
+        # 上下午 / 过期确认：认领就直接回
+        for fn in (self._ans_meridiem, self._ans_expired):
+            hit, rep = fn(text)
+            if hit:
+                return True, rep
+
+        # 提前多久提醒
+        hit, rep = self._answer_remind(text)
+        if hit:
+            return True, rep
+
+        # 优先级 / 截止时间：可能只消耗半句，剩下的仍要当新内容解析
+        matched, reply, rest = self._apply_pri_answer(text)
+        if matched:
+            return True, reply
+        # 连续答不上来已自动收尾 → 本次输入按新内容处理，
+        # 把「已按默认优先级记着」的交代拼在前面
+        _miss = getattr(self, "_miss_reply", None)
+        if _miss:
+            self._miss_reply = None
+            _sub = self.respond(rest or text)
+            return True, _miss + ("\n" + _sub if _sub else "")
+        self._turn_rest = rest
+
+        # 重名确认
+        hit, rep = self._ans_dup(text)
+        if hit:
+            return True, rep
+        return False, None
+
     def respond(self, text):
         """生成回复，并处理任务增删"""
         _hit, _rep = self._intercept(text)
         if _hit:
             return _rep
 
-        # ⓪ 最新问题优先（v1.9.5）：同时挂着多个待答状态时，回答只送给最近问的那一个，
-        #    避免「不用」被优先级/提醒等旧问题吃掉，导致错配（用户反馈的串线 bug）
-        q = getattr(self, "_pending_q", None)
-        if q == "meridiem" and getattr(self, "_pending_meridiem", None):
-            ans = self._resolve_meridiem(text)
-            if ans is not None:
-                return ans
-        if q == "expired" and getattr(self, "_pending_expired", None):
-            _ans = self._resolve_expired(text)
-            if _ans is not None:
-                return _ans
-            # 返回 None：用户输的是新任务句，继续往下正常解析
-        if q == "remind" and getattr(self, "_pending_remind", None):
-            pass        # 落到下面原有的提醒回答分支
-        elif q == "pri" and getattr(self, "_pending_task", None):
-            pass        # 落到下面原有的优先级/截止回答分支
-
-        # 待答状态：用户正在回答「提前多久提醒」？
-        _hit, _rep = self._answer_remind(text)
+        # 待答状态：用户正在回答哪个问题？（meridiem/expired/remind/pri/dup）
+        # 统一入口，顺序即优先级；handled=False 表示「这不是回答」→
+        # 放行给下面的任务解析（不能把新任务句吞掉）
+        _hit, _rep = self._handle_pending(text)
         if _hit:
             return _rep
 
-        # 上一轮在等用户回答新任务的优先级/截止时间
-        matched, reply, rest = self._apply_pri_answer(text)
-        if matched:
-            return reply
-        # v1.9.9.25：连续答不上来已自动收尾 → 本次输入按新内容处理，
-        # 把「已按默认优先级记着」的交代拼在前面
-        _miss_reply = getattr(self, "_miss_reply", None)
-        if _miss_reply:
-            self._miss_reply = None
-            _sub = self.respond(text)
-            sep = "\n" if i18n.is_en() else "\n"
-            return _miss_reply + (sep + _sub if _sub else "")
-        text = rest or text
-
-        # 上一轮在等用户确认「过期的截止时间」（v1.9.4）
-        pe = getattr(self, "_pending_expired", None)
-        if pe:
-            return self._resolve_expired(text)
-
-        # 上一轮在等用户确认「重复任务」
-        pd = getattr(self, "_pending_dup", None)
-        if pd:
-            self._pending_dup = None
-            if self._dup_ok_re().search(text):
-                self._add_single(pd["title"], pd["hhmm"], pd["score"],
-                                 pd["dur"], override=pd["new_title"])
-                return tr("dup_added", title=pd["new_title"])
-            # 其他回答：放弃确认，按普通输入继续解析
+        # 优先级追问可能只消耗半句（「答完优先级，后半句是新任务」）
+        text = getattr(self, "_turn_rest", None) or text
 
         pz = self.p()
         # 英文模式下用户输入中文：解析仍用中文引擎（否则识别不出），
