@@ -4435,6 +4435,72 @@ class NoteApp(object):
                 return True, r
         return False, None
 
+    # ---------------- 勾选意图（v1.9.9.29 重构）
+    #
+    # 这一段是「软意图」的典型：口语里「完成X / X完成了 / X打卡了 / 做了X」
+    # 都可能是完成语，也都可能是新任务（「买牛奶」曾被看成「买」+完成语）。
+    # 处理原则只有一条：**先确认能匹配到已有任务，才认定是完成**；
+    # 匹配不上就放行给任务解析。
+    def _is_done_intent(self, text, pz):
+        """(是否是完成语, 是否是软完成语)
+
+        硬完成语：「完成X / X做完了」——带 DONE_RE 里的完成动词，
+                  认错了至少会回一句「没找到」，不会静默建任务。
+        软完成语：「X打卡了 / 做了X」——动词太泛，必须额外校验。"""
+        if len(text or "") > 24:
+            return False, False
+        soft = bool(re.search(r"(打个?卡|打卡|签到|签个到)", text or "")) or \
+            bool(re.match(r"^[\s，,]*(?:我)?(?:今天|刚刚|已经)?\s*"
+                          r"(?:做|弄|搞|看|读|背|学|练|写|听|跑)(?:了|过|完)", text or ""))
+        hard = bool(pz.DONE_RE.search(text or ""))
+        return (hard or soft), (soft and not hard)
+
+    def _finish_task(self, task):
+        """把一个任务标记完成（日常任务走打卡），返回回复"""
+        if self._is_daily(task):
+            # 日常任务：勾的是「今天打卡」，不是「这件事完了」
+            self._daily_toggle(task)
+            self.store.save()
+            self.refresh_tasks()
+            return tr("daily_checked", t=task["title"])
+        task["done"] = True
+        task["done_at"] = dt.datetime.now().strftime("%H:%M")
+        self.store.save()
+        self.store.sync_history()
+        self.refresh_tasks()
+        return self._praise(tr("done_ok", title=task["title"]))
+
+    def _handle_complete(self, text, parsed_now, pz):
+        """勾选意图。返回 (handled, reply)"""
+        is_done, is_soft = self._is_done_intent(text, pz)
+        if not is_done:
+            return False, None
+
+        # 序号形式优先（「完成第一个」「做完了第二条」），
+        # 否则会被当成叫「第二条」的任务名
+        if re.search(r"第\s*(?:[0-9]+|[一二三四五六七八九十]{1,3})\s*[个条项件]?",
+                     text or ""):
+            idx_title = self._done_by_index(text)
+            if idx_title is not None:
+                return True, idx_title
+
+        done_title = self._done_target(text, parsed_now, pz)
+        if done_title is None:
+            # 抽不出任务名：硬完成语给「没找到」，软完成语放行（可能是新任务）
+            if not is_soft:
+                return True, tr("done_notfound", title=(text or "").strip())
+            return False, None
+
+        for task in self.store.tasks:
+            if self._match(done_title, task["title"]):
+                if not task.get("done"):
+                    return True, self._finish_task(task)
+                break
+        if not is_soft:
+            return True, tr("done_notfound", title=done_title)
+        # 软完成语且没匹配上 → 这是新任务（「买牛奶」）
+        return False, None
+
     def respond(self, text):
         """生成回复，并处理任务增删"""
         _hit, _rep = self._intercept(text)
@@ -4504,46 +4570,10 @@ class NoteApp(object):
         if _hit:
             return _rep
 
-        # 勾选意图（v1.9.9.25 全面扩语序，P0-4）
-        # 支持：「完成/完成了/做完/做完了/搞定/搞定了/做好 + 任务名」
-        #       「任务名 + 完成了/做完了/搞定了」
-        #       「完成第一个 / 做完了第二条」（按未完成列表序号）
-        # v1.9.9.28：加入「XX 打卡了」「做了 XX」等日常口语完成式。
-        # 这类口语式**必须先匹配上已有任务**才当完成，否则（「买牛奶」
-        # 被看成「买」+「牛奶」）会把新建任务吞掉——所以先查再决定。
-        _soft_done = bool(re.search(r"(打个?卡|打卡|签到|签个到)", text or "")) or \
-            bool(re.match(r"^[\s，,]*(?:我)?(?:今天|刚刚|已经)?\s*"
-                          r"(?:做|弄|搞|看|读|背|学|练|写|听|跑)(?:了|过|完)", text or ""))
-        if (pz.DONE_RE.search(text) or _soft_done) and len(text) <= 24:
-            done_title = self._done_target(text, parsed_now, pz)
-            # v1.9.9.25：序号形式优先（「完成第一个」「做完了第二条」），
-            # 否则会被当成叫「第二条」的任务名
-            if re.search(r"第\s*(?:[0-9]+|[一二三四五六七八九十]{1,3})\s*[个条项件]?",
-                         (text or "")):
-                idx_title = self._done_by_index(text)
-                if idx_title is not None:
-                    return idx_title
-            if done_title is None:
-                if not _soft_done or pz.DONE_RE.search(text):
-                    return tr("done_notfound", title=(text or "").strip())
-            else:
-                for task in self.store.tasks:
-                    if self._match(done_title, task["title"]):
-                        if not task.get("done"):
-                            if self._is_daily(task):
-                                # 日常任务：勾的是「今天打卡」，不是「这件事完了」
-                                now_done, streak = self._daily_toggle(task)
-                                self.store.save()
-                                self.refresh_tasks()
-                                return tr("daily_checked", t=task["title"])
-                            task["done"] = True
-                            task["done_at"] = dt.datetime.now().strftime("%H:%M")
-                            self.store.save()
-                            self.store.sync_history()
-                            self.refresh_tasks()
-                            return self._praise(tr("done_ok", title=task["title"]))
-                if pz.DONE_RE.search(text):
-                    return tr("done_notfound", title=done_title)
+        # 勾选意图：完成 / 打卡
+        _hit, _rep = self._handle_complete(text, parsed_now, pz)
+        if _hit:
+            return _rep
 
         # 改时间意图（v1.9.9.25）：「把开会改到下午4点」「开会改成明天3点」
         m_adj = re.match(r"^[\s，,]*(?:帮我|请)?(?:把|将)?\s*(.+?)\s*"
