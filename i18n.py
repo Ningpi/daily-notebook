@@ -331,18 +331,16 @@ STRINGS = {
     "user_name_changed": ("好，以后就叫你{name}了（原来叫{old}）。",
                           "Okay, I'll call you {name} from now on (was {old})."),
     "usage_guide": (
-        "重点功能：\n"
-        "· 「撤回」撤销上一步操作：建错任务、设错截止时间、设错提醒时间均可撤，撤后可重新输入\n"
-        "· 「撤回任务」删除刚建的任务；「撤回时间」仅清除截止时间\n"
-        "· 到点自动弹窗提醒；已过期的任务会先确认是否保留\n"
-        "· 右键任务：改名 / 调优先级 / 删除；双击标题可直接改名\n"
-        "· 直接输入即可建任务，如「明天下午3点前交报告」",
-        "Key features:\n"
-        "· \"Undo\" reverts the last step — wrong task, deadline, or reminder time; then re-enter freely\n"
-        "· \"Undo task\" deletes the new task; \"undo time\" only clears the deadline\n"
-        "· Pop-up reminders when due; expired tasks ask before being kept\n"
-        "· Right-click a task: rename / priority / delete; double-click title to rename\n"
-        "· Type naturally to add tasks, e.g. \"submit report by 3pm tomorrow\""),
+        "小技巧：\n"
+        "· 直接打字就能建任务，如「明天下午3点前交报告」\n"
+        "· 说「列表」看待办，「今天做了什么」看完成；日常任务说「背单词打卡了」即可打卡\n"
+        "· 建错了说「撤回」\n"
+        "· 双击任务可改名，右键有更多操作",
+        "Tips:\n"
+        "· Just type to add a task, e.g. \"submit report by 3pm tomorrow\"\n"
+        "· Say \"list\" for to-dos, \"what did I do today\" for done; daily tasks: \"checked in vocabulary\"\n"
+        "· Made a mistake? Say \"undo\"\n"
+        "· Double-click a task to rename; right-click for more"),
     "font_size": ("字体大小", "Font size"),
     "text_dark": ("字体深浅", "Text shade"),
     "save_warn": ("⚠️ 提醒一下：当前目录没有写入权限，任务可能存不下来。"
