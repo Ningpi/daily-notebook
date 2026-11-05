@@ -4501,6 +4501,112 @@ class NoteApp(object):
         # 软完成语且没匹配上 → 这是新任务（「买牛奶」）
         return False, None
 
+    # ---------------- 其余任务操作（v1.9.9.29 重构）
+    # 改时间 / 删除 / 寒暄。原来是一串平铺 if，现在拆成三个方法，
+    # 由 _handle_task_ops 按顺序试——顺序即优先级，与代码位置无关。
+    def _op_reschedule(self, text, parsed, pz):
+        """改时间：「把开会改到下午4点」「开会改成明天3点」"""
+        m_adj = re.match(r"^[\s，,]*(?:帮我|请)?(?:把|将)?\s*(.+?)\s*"
+                         r"(?:改到|改成|改为|挪到|调整到|调到)\s*(.+)$",
+                         (text or "").strip())
+        if not m_adj:
+            return False, None
+        name, when = m_adj.group(1).strip(), m_adj.group(2).strip()
+        for task in self.store.tasks:
+            if not self._match(name, task["title"]):
+                continue
+            _t = (core.find_times(when) or [None])[0]
+            if not _t:
+                break
+            _d = core.find_deadline_date(when)
+            task["hhmm"] = _t[0]
+            task["due_date"] = (_d[0].isoformat() if _d and _d[0]
+                               else task.get("due_date"))
+            task["deadline_txt"] = (task["due_date"] and
+                                    "%s %s" % (
+                                        "%d月%d日" % (int(task["due_date"][5:7]),
+                                                     int(task["due_date"][8:10])),
+                                        _t[0])) or _t[0]
+            task["_from_raw"] = False
+            self._push_undo({"kind": "deadline", "id": task["id"]})
+            self.store.save()
+            self.refresh_tasks()
+            return True, tr("dl_set", t=task["title"], d=task["deadline_txt"])
+        return False, None
+
+    def _op_delete(self, text, parsed, pz):
+        """删除：「取消写周报」「删除健身」「删除第二个任务」
+
+        删不掉时明确回「没找到」，绝不落到新建任务分支。"""
+        t = (text or "").strip()
+        _cancel = re.match(r"^[\s，,]*(?:帮我|请)?(?:取消|不要了?|不做了?|别做|"
+                           r"删掉|删了|删除|删|去掉|移除|干掉)"
+                           r"(?:掉|了)?\s*(.+?)(?:了|吧|啦)?\s*[。.！!～~]*$", t)
+        if _cancel and len(t) <= 20 and not re.search(
+                r"第\s*(?:[0-9]+|[一二三四五六七八九十]{1,3})\s*[个条项件]", t):
+            nm = _cancel.group(1).strip()
+            if nm and nm not in ("任务", "待办"):
+                for i, task in enumerate(list(self.store.tasks)):
+                    if self._match(nm, task["title"]):
+                        self._push_undo({"kind": "delete", "id": task["id"],
+                                         "task": dict(task), "index": i,
+                                         "label": "删除【%s】" % task["title"]})
+                        self.store.tasks.pop(i)
+                        self.store.save()
+                        self.refresh_tasks()
+                        return True, tr("deleted", title=task["title"])
+                # 删不掉也要有回应，别掉进「新建任务」
+                if re.match(r"^[\s，,]*(?:删掉|删了|删除|删|去掉|移除|干掉)", t):
+                    return True, tr("done_notfound", title=nm)
+
+        _del_idx = re.match(r"^[\s，,]*(?:删|删除|去掉|删掉)\s*第\s*"
+                            r"([0-9]+|[一二三四五六七八九十]{1,3})\s*[个条项件]?"
+                            r"(?:任务|待办|的)?\s*$", t)
+        if _del_idx:
+            raw = _del_idx.group(1)
+            try:
+                idx = int(raw)
+            except ValueError:
+                idx = core._num(raw)
+            left = [x for x in self.sorted_tasks() if not x[1].get("done")]
+            if idx and 1 <= int(idx) <= len(left):
+                task = left[int(idx) - 1][1]
+                i = self.store.tasks.index(task)
+                self._push_undo({"kind": "delete", "id": task["id"],
+                                 "task": dict(task), "index": i,
+                                 "label": "删除【%s】" % task["title"]})
+                self.store.tasks.pop(i)
+                self.store.save()
+                self.refresh_tasks()
+                return True, tr("deleted", title=task["title"])
+            return True, tr("done_notfound", title="第%s个任务" % raw)
+
+        if pz.DEL_RE.search(t) and parsed:
+            target = parsed[0][0]
+            for i, task in enumerate(list(self.store.tasks)):
+                if self._match(target, task["title"]):
+                    self.store.tasks.pop(i)
+                    self.store.save()
+                    return True, tr("deleted", title=task["title"])
+        return False, None
+
+    def _op_greet(self, text, parsed, pz):
+        """寒暄 / 道谢（只认短句，长句里带寒暄词仍按任务解析）"""
+        if len(text or "") > 16:
+            return False, None
+        if pz.GREET_RE.search(text or ""):
+            return True, self.greeting()
+        if pz.THANKS_RE.search(text or ""):
+            return True, i18n.pick(random, "thanks")
+        return False, None
+
+    def _handle_task_ops(self, text, parsed_now, pz):
+        for fn in (self._op_reschedule, self._op_delete, self._op_greet):
+            hit, rep = fn(text, parsed_now, pz)
+            if hit:
+                return True, rep
+        return False, None
+
     def respond(self, text):
         """生成回复，并处理任务增删"""
         _hit, _rep = self._intercept(text)
@@ -4575,92 +4681,10 @@ class NoteApp(object):
         if _hit:
             return _rep
 
-        # 改时间意图（v1.9.9.25）：「把开会改到下午4点」「开会改成明天3点」
-        m_adj = re.match(r"^[\s，,]*(?:帮我|请)?(?:把|将)?\s*(.+?)\s*"
-                         r"(?:改到|改成|改为|挪到|调整到|调到)\s*(.+)$",
-                         (text or "").strip())
-        if m_adj:
-            name, when = m_adj.group(1).strip(), m_adj.group(2).strip()
-            for task in self.store.tasks:
-                if self._match(name, task["title"]):
-                    _t = (core.find_times(when) or [None])[0]
-                    if not _t:
-                        break
-                    _d = core.find_deadline_date(when)
-                    task["hhmm"] = _t[0]
-                    task["due_date"] = _d[0].isoformat() if _d and _d[0] else task.get("due_date")
-                    task["deadline_txt"] = (task["due_date"] and
-                                            "%s %s" % (
-                                                "%d月%d日" % (int(task["due_date"][5:7]),
-                                                             int(task["due_date"][8:10])),
-                                                _t[0])) or _t[0]
-                    task["_from_raw"] = False
-                    self._push_undo({"kind": "deadline", "id": task["id"]})
-                    self.store.save()
-                    self.refresh_tasks()
-                    return tr("dl_set", t=task["title"], d=task["deadline_txt"])
-
-        # 删除意图
-        # v1.9.9.25：补「取消写周报 / 不要写周报了」以及「删除第二个任务」
-        # v1.9.9.28：「删除健身」「删掉那个跑步」「把健身删了」原来全都
-        # 落到新任务分支，变成一条叫「删除健身」的任务。现在统一在
-        # 这里认领——删不掉时明确说没找到，绝不新建。
-        _cancel = re.match(r"^[\s，,]*(?:帮我|请)?(?:取消|不要了?|不做了?|别做|"
-                           r"删掉|删了|删除|删|去掉|移除|干掉)"
-                           r"(?:掉|了)?\s*(.+?)(?:了|吧|啦)?\s*[。.！!～~]*$",
-                           (text or "").strip())
-        if _cancel and len(text) <= 20 and not re.search(
-                r"第\s*(?:[0-9]+|[一二三四五六七八九十]{1,3})\s*[个条项件]",
-                text or ""):
-            _nm = _cancel.group(1).strip()
-            if _nm and _nm not in ("任务", "待办"):
-                for i, task in enumerate(list(self.store.tasks)):
-                    if self._match(_nm, task["title"]):
-                        self._push_undo({"kind": "delete", "id": task["id"],
-                                         "task": dict(task), "index": i,
-                                         "label": "删除【%s】" % task["title"]})
-                        self.store.tasks.pop(i)
-                        self.store.save()
-                        self.refresh_tasks()
-                        return tr("deleted", title=task["title"])
-                # 删不掉也要有回应，别掉进「新建任务」
-                if re.match(r"^[\s，,]*(?:删掉|删了|删除|删|去掉|移除|干掉)",
-                            (text or "").strip()):
-                    return tr("done_notfound", title=_nm)
-        _del_idx = re.match(r"^[\s，,]*(?:删|删除|去掉|删掉)\s*第\s*"
-                            r"([0-9]+|[一二三四五六七八九十]{1,3})\s*[个条项件]?"
-                            r"(?:任务|待办|的)?\s*$", (text or "").strip())
-        if _del_idx:
-            raw = _del_idx.group(1)
-            try:
-                idx = int(raw)
-            except ValueError:
-                idx = core._num(raw)
-            left = [x for x in self.sorted_tasks() if not x[1].get("done")]
-            if idx and 1 <= int(idx) <= len(left):
-                task = left[int(idx) - 1][1]
-                i = self.store.tasks.index(task)
-                self._push_undo({"kind": "delete", "id": task["id"],
-                                 "task": dict(task), "index": i,
-                                 "label": "删除【%s】" % task["title"]})
-                self.store.tasks.pop(i)
-                self.store.save()
-                self.refresh_tasks()
-                return tr("deleted", title=task["title"])
-            return tr("done_notfound", title="第%s个任务" % raw)
-
-        if pz.DEL_RE.search(text) and parsed_now:
-            target = parsed_now[0][0]
-            for i, task in enumerate(list(self.store.tasks)):
-                if self._match(target, task["title"]):
-                    self.store.tasks.pop(i)
-                    self.store.save()
-                    return tr("deleted", title=task["title"])
-
-        if pz.GREET_RE.search(text) and len(text) <= 16:
-            return self.greeting()
-        if pz.THANKS_RE.search(text) and len(text) <= 16:
-            return i18n.pick(random, "thanks")
+        # 其余意图：改时间 / 删除 / 寒暄
+        _hit, _rep = self._handle_task_ops(text, parsed_now, pz)
+        if _hit:
+            return _rep
 
         # 「天气预报说有雨」这类背景说明不是任务，从解析结果里剔掉
         parsed_now = [x for x in parsed_now if not self._is_tell_phrase(x[3])]
