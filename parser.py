@@ -277,6 +277,27 @@ def find_weekday(text):
     return delta, m.group(0)
 
 
+def find_weekday_multi(text):
+    """v1.9.9.29：「每周一三五」/「周三、周五」这类连写的星期几。
+
+    返回命中的片段（含所有连写的星期几），没有则 None。
+    用途只有一个：**连写时不要再拿「第一个」当截止日期**。
+    「每周一三五跑步」如果只认「周一」，clean_title 会剥掉「周一」，
+    标题就剩「三五跑步」；而且 find_times 会给它兜底 18:00 的截止时间。
+    """
+    if not text:
+        return None
+    m = re.search(r"(?:周|星期|礼拜)\s*"
+                  r"[一二三四五六日天1-7](?:\s*[、,，和]?\s*[至到\-~]?\s*[一二三四五六日天1-7])+",
+                  text)
+    return m.group(0) if m else None
+
+
+def is_multi_weekday(text):
+    """「每周一三五」这类连写星期几（≥2 个）——不是单一日期"""
+    return find_weekday_multi(text) is not None
+
+
 def find_deadline_date(text):
     """抽取「日期型」截止信息 -> (date 或 None, 原始片段)
     支持：明天/后天/大后天/今天、周三/星期三/下周一/周末、
@@ -430,6 +451,11 @@ def find_times(text):
     wdelta, wraw = find_weekday(text)
     has_clock = any(("点" in raw or ":" in raw) for _h, _hm, _pos, raw in out)
     _has_period = any(raw in PERIOD_HINTS for _h, _hm, _pos, raw in out)
+    # v1.9.9.29：连写的星期几（每周一三五）不是「某个具体日子」，
+    # 它的「今天该不该做」由 repeat 判断，不能兜底成 18:00 的截止时间
+    # ——否则会凭空多出一个当天截止，且 clean_title 还会只剥掉第一个星期几。
+    if find_weekday_multi(text):
+        wdelta, wraw = None, None
     if wdelta is not None and not has_clock and not _has_period:
         out.append(("18:00", (18, 0), 0, wraw))
 
@@ -643,10 +669,17 @@ def clean_title(text, hits=()):
     t = re.sub(r"(?:\d{1,2}|[%s]{1,3})\s*(?:点|時|时)\s*"
                r"(?:一刻|两刻|二刻|三刻)" % CN_DIGIT, " ", t)
     # 「每 + 日期/时间词」整体移除（每周三下午2点开会 → 开会）
-    t = re.sub(r"每\s*(?:周|星期|礼拜)\s*[一二三四五六日天1-7]\s*"
+    # v1.9.9.29：「每周一三五跑步」原来只剥掉「每周一」，剩「三五跑步」。
+    # 星期几可以连写（一三五 / 二四 / 一至五），这里把整串一起吃掉。
+    _WD = r"[一二三四五六日天1-7]"
+    _WDSEQ = _WD + r"(?:\s*[、,，和]?\s*[至到\-~]?\s*" + _WD + r")*"
+    t = re.sub(r"每\s*(?:周|星期|礼拜)\s*" + _WDSEQ + r"\s*"
                r"(?:上午|下午|中午|早上|早晨|晚上|傍晚|夜里|凌晨)?\s*"
                r"(?:\d{1,2}|[%s]{1,3})\s*(?:点|時|时)\s*"
                r"(?:钟|半|\d{1,2}\s*分?)?" % CN_DIGIT, " ", t)
+    # v1.9.9.29：没有钟点的纯星期串也要整段吃（每周一三五跑步 → 跑步）。
+    # 放在上面带钟点的那条之后，避免把「每周三下午2点」啃成「下午2点」。
+    t = re.sub(r"每\s*(?:周|星期|礼拜)\s*" + _WDSEQ, " ", t)
     # v1.9.9.17：先切最长的时间词（「每周一」要在「周一」之前切，
     # 否则短的先切掉、长的就找不到了，标题残留「每」）
     for h in sorted([h for h in hits if h], key=len, reverse=True):
@@ -906,9 +939,24 @@ def split_segments(text):
     _T = (r"(?:\d{1,2}\s*[:：]\s*\d{1,2}|(?:\d{1,2}|[%s]{1,3})\s*(?:点|時|时)"
           r"(?:\s*(?:钟|半|一刻|两刻|二刻|三刻|\d{1,2}\s*分?))?)" % CN_DIGIT)
     text = re.sub(r"(%s)\s*(?:[~～\-—]|~)\s*(%s)" % (_T, _T), r"\1到\2", text)
+    # v1.9.9.29：「每周一、三、五跑步」里的顿号不是分句符，是星期几的
+    # 连接符。先换成占位符，等分句完再还原——否则会被切成
+    # 「每周一 / 三 / 五跑步」三条，标题碎成「每周一」「三」「五跑步」。
+    _SEP = "\u0001"
+    text = re.sub(r"((?:周|星期|礼拜)\s*[一二三四五六日天1-7])"
+                  r"\s*[、,，]\s*(?=[一二三四五六日天1-7])",
+                  lambda m: m.group(1) + _SEP, text)
+    # 连写的第二、三个（周一、三、五 → 已替换成「周一\x01三、五」）
+    for _ in range(5):
+        text2 = re.sub(r"(" + _SEP + r"\s*[一二三四五六日天1-7])"
+                       r"\s*[、,，]\s*(?=[一二三四五六日天1-7])",
+                       lambda m: m.group(1) + _SEP, text)
+        if text2 == text:
+            break
+        text = text2
     segs = []
     for part in re.split(pat, text):
-        part = (part or "").strip()
+        part = (part or "").strip().replace("\u0001", "、")
         if not part:
             continue
         # v1.9.9.18：时间区间先整体保护，不让它成为分割点。

@@ -4684,6 +4684,7 @@ class NoteApp(object):
         # 待答状态：用户正在回答哪个问题？（meridiem/expired/remind/pri/dup）
         # 统一入口，顺序即优先级；handled=False 表示「这不是回答」→
         # 放行给下面的任务解析（不能把新任务句吞掉）
+        self._turn_rest = None      # 本轮「答完问题后剩下的半句」，先清空
         _hit, _rep = self._handle_pending(text)
         if _hit:
             return _rep
