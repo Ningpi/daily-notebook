@@ -4299,6 +4299,100 @@ class NoteApp(object):
                 return True, (None if reply is _SILENT else reply)
         return False, None
 
+    # ---------------- 待答状态（v1.9.9.29 重构）
+    # 原来散在 respond 里（_pending_q/_pending_remind/_pending_task/
+    # _pending_expired/_pending_dup/_pending_meridiem），每个都是
+    # 「先判断再处理」的平铺 if，谁写前面谁赢。统一成处理器后，
+    # 返回 (handled, reply)；handled=False = 这不是回答 → 放行给任务解析
+    # （关键：绝不能把「晚上8点前做好新闻稿」这种新任务句吞掉）。
+    def _answer_remind(self, text):
+        """回答「提前多久提醒」"""
+        pr = getattr(self, "_pending_remind", None)
+        if not pr:
+            return False, None
+        task = None
+        for t in self.store.tasks:
+            if t["id"] == pr:
+                task = t
+                break
+        import re as _re_r
+        # 只有「短答复」才算回答；像「晚上8点前做好新闻稿，A」这种长句
+        # 应当按新任务解析，不能被提醒问答吞掉
+        _s = text.strip()
+        is_short = len(_s) <= 12
+        # 明显的任务句（带动作/宾语）一律按新输入处理
+        if is_short and _re_r.search(r"(做好|做完|完成|写|交|准备|整理|发|去|买|做|开|打|看|读)", _s) \
+                and len(_s) > 6:
+            is_short = False
+        m_r = _re_r.search(
+            r"(?<![A-Za-z])([ABCDEF])(?![A-Za-z])|不用|无需|不用了|\bno\b|\bnone\b",
+            text, _re_r.I) if is_short else None
+        # 指定时刻：直接写「08:00」「前一晚21点」「早上7点半」
+        at_min = self._parse_remind_clock(text) if is_short else None
+        if task is not None and (m_r or at_min is not None):
+            # P2 问题10（v1.9.9.22）：提醒问答已得到回答，追问状态
+            # 必须清掉——否则紧跟着的「撤回」会被当成取消流程
+            self._pending_q = None
+            self._pending_remind = None
+            tok = (m_r.group(1) or "").strip().upper() if m_r else ""
+            if tok == "F" and at_min is None:
+                return True, tr("ask_remind_at")     # 只想指定时刻，等下一句
+            if at_min is not None:
+                self._pending_remind = None
+                # v1.9.9.9：记录旧提醒设置，说「撤回」可退回本问并重设
+                self._push_undo({"kind": "remind_at", "id": task["id"],
+                                 "prev": {"remind_at": task.get("remind_at"),
+                                          "remind_day": task.get("remind_day"),
+                                          "remind_before": task.get("remind_before")}})
+                task["remind_at"] = at_min[0]          # "HH:MM"
+                task["remind_day"] = at_min[1]         # 0=当天 1=前一天
+                task["remind_before"] = None
+                self.store.save()
+                return True, tr("remind_at", t=task["title"],
+                                d=self._remind_at_text(at_min[0], at_min[1]))
+            self._pending_remind = None
+            if tok == "E" or "不用" in text or "无需" in text \
+                    or _re_r.search(r"\b(no|none)\b", text, _re_r.I):
+                task["remind_before"] = 0
+                reply = tr("remind_off", t=task["title"])
+            else:
+                # 字母归属随「剩余时长裁剪」动态变化（v1.9.5），按映射取
+                lmap = getattr(self, "_remind_letter_map", None) \
+                    or {"A": 5, "B": 15, "C": 30, "D": 60}
+                # v1.9.9.28：敲了选项表里没有的字母（这里问的是 E/F，
+                # 用户还按上一问的习惯回了个 A）→ 当作跳过，不设提醒。
+                # 原来会掉进最后的 else 静默设成「提前 5 分钟」，
+                # 用户完全不知道给自己设了个提醒。
+                if tok and tok not in lmap and tok != "F":
+                    task["remind_before"] = 0
+                    self.store.save()
+                    return True, tr("remind_off", t=task["title"])
+                if tok in lmap and lmap[tok]:
+                    mins = lmap[tok]
+                elif tok in lmap:          # 选到了「不用提醒」
+                    mins = 0
+                elif "15" in text:
+                    mins = 15
+                elif "30" in text:
+                    mins = 30
+                elif "5" in text:
+                    mins = 5
+                else:
+                    mins = 5
+                if mins == 0:
+                    task["remind_before"] = 0
+                    self.store.save()
+                    return True, tr("remind_off", t=task["title"])
+                task["remind_before"] = mins
+                task["remind_at"] = None
+                key = {5: "remind_5", 15: "remind_15",
+                       30: "remind_30", 60: "remind_60"}[mins]
+                reply = tr("remind_set", t=task["title"], d=tr(key))
+            self.store.save()
+            return True, reply
+        self._pending_remind = None    # 不是回答，按普通输入处理
+        return False, None
+
     def respond(self, text):
         """生成回复，并处理任务增删"""
         _hit, _rep = self._intercept(text)
@@ -4322,90 +4416,10 @@ class NoteApp(object):
         elif q == "pri" and getattr(self, "_pending_task", None):
             pass        # 落到下面原有的优先级/截止回答分支
 
-        # 上一轮在等用户选「提前多久提醒」
-        pr = getattr(self, "_pending_remind", None)
-        if pr:
-            task = None
-            for t in self.store.tasks:
-                if t["id"] == pr:
-                    task = t
-                    break
-            import re as _re_r
-            # 只有「短答复」才算回答；像「晚上8点前做好新闻稿，A」这种长句
-            # 应当按新任务解析，不能被提醒问答吞掉
-            _s = text.strip()
-            is_short = len(_s) <= 12
-            # 明显的任务句（带动作/宾语）一律按新输入处理
-            if is_short and _re_r.search(r"(做好|做完|完成|写|交|准备|整理|发|去|买|做|开|打|看|读)", _s) \
-                    and len(_s) > 6:
-                is_short = False
-            m_r = _re_r.search(
-                r"(?<![A-Za-z])([ABCDEF])(?![A-Za-z])|不用|无需|不用了|\bno\b|\bnone\b",
-                text, _re_r.I) if is_short else None
-            # 指定时刻：直接写「08:00」「前一晚21点」「早上7点半」
-            at_min = self._parse_remind_clock(text) if is_short else None
-            if task is not None and (m_r or at_min is not None):
-                # P2 问题10（v1.9.9.22）：提醒问答已得到回答，追问状态
-                # 必须清掉——否则紧跟着的「撤回」会被当成取消流程
-                self._pending_q = None
-                self._pending_remind = None
-                tok = (m_r.group(1) or "").strip().upper() if m_r else ""
-                if tok == "F" and at_min is None:
-                    return tr("ask_remind_at")     # 只想指定时刻，等下一句
-                if at_min is not None:
-                    self._pending_remind = None
-                    # v1.9.9.9：记录旧提醒设置，说「撤回」可退回本问并重设
-                    self._push_undo({"kind": "remind_at", "id": task["id"],
-                                     "prev": {"remind_at": task.get("remind_at"),
-                                              "remind_day": task.get("remind_day"),
-                                              "remind_before": task.get("remind_before")}})
-                    task["remind_at"] = at_min[0]          # "HH:MM"
-                    task["remind_day"] = at_min[1]         # 0=当天 1=前一天
-                    task["remind_before"] = None
-                    self.store.save()
-                    return tr("remind_at", t=task["title"],
-                              d=self._remind_at_text(at_min[0], at_min[1]))
-                self._pending_remind = None
-                if tok == "E" or "不用" in text or "无需" in text \
-                        or _re_r.search(r"\b(no|none)\b", text, _re_r.I):
-                    task["remind_before"] = 0
-                    reply = tr("remind_off", t=task["title"])
-                else:
-                    # 字母归属随「剩余时长裁剪」动态变化（v1.9.5），按映射取
-                    lmap = getattr(self, "_remind_letter_map", None) \
-                        or {"A": 5, "B": 15, "C": 30, "D": 60}
-                    # v1.9.9.28：敲了选项表里没有的字母（这里问的是 E/F，
-                    # 用户还按上一问的习惯回了个 A）→ 当作跳过，不设提醒。
-                    # 原来会掉进最后的 else 静默设成「提前 5 分钟」，
-                    # 用户完全不知道给自己设了个提醒。
-                    if tok and tok not in lmap and tok != "F":
-                        task["remind_before"] = 0
-                        self.store.save()
-                        return tr("remind_off", t=task["title"])
-                    if tok in lmap and lmap[tok]:
-                        mins = lmap[tok]
-                    elif tok in lmap:          # 选到了「不用提醒」
-                        mins = 0
-                    elif "15" in text:
-                        mins = 15
-                    elif "30" in text:
-                        mins = 30
-                    elif "5" in text:
-                        mins = 5
-                    else:
-                        mins = 5
-                    if mins == 0:
-                        task["remind_before"] = 0
-                        self.store.save()
-                        return tr("remind_off", t=task["title"])
-                    task["remind_before"] = mins
-                    task["remind_at"] = None
-                    key = {5: "remind_5", 15: "remind_15",
-                           30: "remind_30", 60: "remind_60"}[mins]
-                    reply = tr("remind_set", t=task["title"], d=tr(key))
-                self.store.save()
-                return reply
-            self._pending_remind = None    # 不是回答，按普通输入处理
+        # 待答状态：用户正在回答「提前多久提醒」？
+        _hit, _rep = self._answer_remind(text)
+        if _hit:
+            return _rep
 
         # 上一轮在等用户回答新任务的优先级/截止时间
         matched, reply, rest = self._apply_pri_answer(text)
