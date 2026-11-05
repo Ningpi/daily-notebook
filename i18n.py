@@ -86,6 +86,9 @@ STRINGS = {
     "menu_priority": ("调整优先级", "Set priority"),
     "pri_label": ("优先级", "Priority"),
     "quote_wrap": ("◆ {q}", "◆ {q}"),
+    # v1.9.9.32：对话不再打勾，引导去清单手动勾
+    "checkin_hint": ("打卡不用打字啦——直接在下面清单里点一下方框就行 ✅",
+                     "No need to type it — just tick the box in the list below ✅"),
     "dup_times_fmt": ("{t}（第{n}次）", "{t} (#{n})"),
     "dup_ask": ("已有相似任务「{title}」。\n"
                 "· 回复【就这个】，我会记成「{new}」\n"
@@ -438,11 +441,13 @@ STRINGS = {
     "grp_daily": ("日常", "Daily"),
     "grp_tmp": ("临时", "One-off"),
     "grp_done": ("已完成", "Done"),
-    "daily_progress": ("今日 {d}/{n}", "{d}/{n} today"),
+    # v1.9.9.32：两处计数统一口径（今天该做的日常里完成几件），
+    # 文案把「谁除以谁」说破，不再出现裸的 1/3
+    "daily_progress": ("今日完成 {d}/{n}", "{d}/{n} done today"),
     "daily_checked": ("打卡了：{t}", "Checked in: {t}"),
     "daily_unchecked": ("已取消今天的打卡：{t}", "Undid today's check-in: {t}"),
-    "daily_left": ("日常 {d}/{n} · 临时 {m} 件没做",
-                   "Daily {d}/{n} · {m} one-off left"),
+    "daily_left": ("今日日常 {d}/{n} · 待办 {m}",
+                   "Daily {d}/{n} today · {m} to do"),
     "counter_plain": ("待办 {left} · 已完成 {done}", "{left} to do · {done} done"),
     "daily_tip": ("这是每天都要做的事", "This is a daily task"),
 }

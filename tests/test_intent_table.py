@@ -89,10 +89,10 @@ BUILD = [
     ("买牛奶", ["买牛奶"]),
     ("写周报", ["写周报"]),
     ("明天下午三点开会", ["开会"]),
-    ("每天早上八点背单词", ["每天背单词"]),
+    ("每天早上八点背单词", ["背单词"]),        # v1.9.9.32：「每天」不进标题
     ("每周一三五跑步", ["跑步"]),
-    ("每个工作日写日报", ["每个工作日写日报"]),   # 工作日限定词保留，语义不丢
-    ("每个月5号交房租", ["每个月交房租"]),      # 号数进 repeat，标题留「每个月」
+    ("每个工作日写日报", ["写日报"]),          # v1.9.9.32：限定词不进标题
+    ("每个月5号交房租", ["交房租"]),           # v1.9.9.32：号数进 repeat，标题留本体
     ("买什么菜", ["买什么菜"]),          # 带动作的疑问句仍是任务
     ("明天要交什么报告", ["要交什么报告"]),
 ]
@@ -156,21 +156,22 @@ class TestIntentTable:
         assert [t["title"] for t in a.store.tasks] == ["买牛奶"]
 
     def test_soft_done_matches_existing(self, app):
-        """「背单词打卡了」匹配到日常任务 → 打卡，不是新任务"""
+        """v1.9.9.32：「背单词打卡了」不再打勾也不建任务，回提示"""
         a = _fresh(app)
         a.respond("每天早上八点背单词")
         a.respond("不用")
-        before = len(a.store.tasks)
-        a.respond("背单词打卡了")
-        assert len(a.store.tasks) == before
-        assert a.store.tasks[0]["done"] is True
+        r = a.respond("背单词打卡了")
+        assert [t["title"] for t in a.store.tasks] == ["背单词"]
+        assert a.store.tasks[0]["done"] is False
+        assert "清单" in (r or "") or "打勾" in (r or ""), r
 
     # ---- 硬意图：认错了也要有回应，不能静默建任务
-    def test_hard_done_missing_gets_reply(self, app):
+    def test_hard_done_is_build_now(self, app):
+        """v1.9.9.32：「完成X」就是建任务——用户的心智模型如此"""
         a = _fresh(app)
-        r = a.respond("完成一个根本不存在的东西")
-        assert not a.store.tasks
-        assert "没找到" in (r or ""), r
+        a.respond("完成一个根本不存在的东西")
+        assert len(a.store.tasks) == 1, a.store.tasks
+        assert not a.store.tasks[0]["done"]
 
 
 class TestV199931DailyPhrasing:
@@ -218,3 +219,84 @@ class TestV199931DailyPhrasing:
         tomorrow = (_dt.date.today() + _dt.timedelta(days=1)).isoformat()
         a.store._roll_day(tomorrow)
         assert a.store.tasks[0]["done"] is False, "第二天应重新变成待办"
+
+
+class TestV199932UserAudit:
+    """v1.9.9.32：真实用户实测反馈的修复
+
+    1) 日历整页空白（repeat 变 dict 后 `.find` 崩掉整个绘制）
+    2) 「背单词打卡了」被建成临时任务 → 现在只回提示
+    3) 对话不再打勾，「完成X」= 新任务
+    4) 日常任务标题残留「每天/每个工作日/每个月」
+    """
+
+    def test_calendar_renders_with_dict_repeat(self, app):
+        """repeat 是 dict 时日历绘制不能崩（用户截图：整页空白）"""
+        a = _fresh(app)
+        a.store.tasks = [{"id": "d1", "title": "完成数学作业", "score": 30,
+                          "done": False, "manual": False, "hhmm": "20:00",
+                          "day": a.store._today(), "created": "09:00",
+                          "repeat": {"kind": "daily", "weekday": None,
+                                     "monthday": None}}]
+        a.store.save()
+        a.open_calendar_view()          # 崩了这里直接 Red
+        a._draw_calendar()
+        assert a._cal_win.winfo_exists()
+
+    def test_calendar_daily_dot_extends(self, app):
+        """每天任务未来 60 天都该有圆点（旧代码 0 天）"""
+        import datetime as _dt
+        a = _fresh(app)
+        a.store.tasks = [{"id": "d1", "title": "完成数学作业", "score": 30,
+                          "done": False, "manual": False, "hhmm": None,
+                          "day": a.store._today(), "created": "09:00",
+                          "repeat": {"kind": "daily", "weekday": None,
+                                     "monthday": None}}]
+        hits = sum(1 for i in range(1, 8)
+                   if a._cal_day_items(
+                       (_dt.date.today() + _dt.timedelta(days=i)).isoformat()))
+        assert hits == 7, hits
+
+    def test_calendar_string_repeat_compat(self, app):
+        """旧数据 repeat 是字符串「每周三」——只在周三有安排"""
+        import datetime as _dt
+        a = _fresh(app)
+        a.store.tasks = [{"id": "w1", "title": "周三开会", "score": 30,
+                          "done": False, "manual": False, "hhmm": None,
+                          "day": a.store._today(), "created": "09:00",
+                          "repeat": "每周三"}]
+        wd_hits = [(_dt.date.today() + _dt.timedelta(days=i)).weekday()
+                   for i in range(1, 15)
+                   if a._cal_day_items(
+                       (_dt.date.today() + _dt.timedelta(days=i)).isoformat())]
+        assert wd_hits and set(wd_hits) == {2}, wd_hits
+
+    def test_checkin_phrase_no_task(self, app):
+        """「背单词打卡了」→ 提示，不建「背单词打卡」临时任务"""
+        a = _fresh(app)
+        r = a.respond("背单词打卡了")
+        assert not a.store.tasks, a.store.tasks
+        assert "清单" in (r or "") or "打勾" in (r or ""), r
+
+    def test_complete_creates_not_checks(self, app):
+        """「完成英语作业」= 新任务（不再回「没找到」）"""
+        a = _fresh(app)
+        a.respond("完成英语作业")
+        assert [t["title"] for t in a.store.tasks] == ["完成英语作业"]
+        assert not a.store.tasks[0]["done"]
+
+    def test_retype_daily_merges_not_duplicates(self, app):
+        """已打卡的日常任务再说一遍同句话 → 更新而不是再建一条"""
+        a = _fresh(app)
+        a.respond("完成数学作业，每天晚上八点")
+        a.store.tasks[0]["done"] = True     # 今天已打卡
+        a.respond("完成数学作业，每天晚上八点")
+        assert len(a.store.tasks) == 1, a.store.tasks
+
+    def test_title_no_repeat_qualifier(self):
+        import parser
+        for src, want in [("每天早上八点背单词", "背单词"),
+                          ("每个工作日写日报", "写日报"),
+                          ("每个月5号交房租", "交房租")]:
+            got = parser.parse_tasks(src)[0][0]
+            assert got == want, "%s -> %s" % (src, got)

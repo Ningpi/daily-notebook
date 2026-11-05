@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.31"
+VERSION = "1.9.9.32"
 
 
 # ----------------------------------------------------------------- 配色
@@ -260,6 +260,12 @@ class Store(object):
             t["reminded_day"] = None
             rep = t.get("repeat")
             if rep:
+                # v1.9.9.32：兼容旧数据的字符串 repeat（「每周三」）
+                if isinstance(rep, str):
+                    rep = core.find_repeat(rep)
+                    if rep is None:
+                        continue
+                    t["repeat"] = rep
                 try:
                     due = core.repeat_due_today(rep)
                 except Exception:
@@ -1519,8 +1525,13 @@ class NoteApp(object):
         self.chat_wrap.pack(side="top", fill="x")
         self.list_mode = "task"          # task=待办 / note=便签
         self.chat_h = int(getattr(self.store, "chat_h", None) or 96)
+        # v1.9.9.32：聊天区右侧滚动条（同待办区——拖一下直达旧消息）
+        self.chat_sb = tk.Scrollbar(self.chat_wrap, orient="vertical",
+                                    width=11, command=self._chat_scroll)
+        self.chat_sb.pack(side="right", fill="y")
         self.chat_cv = Canvas(self.chat_wrap, height=self.chat_h)
         self.chat_cv.pack(side="top", fill="both")
+        self.chat_cv.configure(yscrollcommand=self._chat_sb_sync)
         self.chat_cv.bind("<Configure>", lambda e: self.debounce("chat", self.render_messages))
         self.chat_cv.bind("<MouseWheel>", self.on_chat_wheel)
         self.chat_cv.bind("<Button-4>", lambda e: self.on_chat_wheel(e, -1))
@@ -1590,8 +1601,14 @@ class NoteApp(object):
         # 任务列表（Canvas + 滚轮）
         self.list_wrap = tk.Frame(r, bg=C.BG)
         self.list_wrap.pack(side="top", fill="both", expand=True)
+        # v1.9.9.32：右侧可拖动滚动条——消息/任务一多，光靠滚轮一格一格
+        # 挪太慢。先建画布对象（不布局），滚动条 pack 在右、画布 pack 占余下
         self.list_cv = Canvas(self.list_wrap)
+        self.list_sb = tk.Scrollbar(self.list_wrap, orient="vertical",
+                                    width=11, command=self.list_cv.yview)
+        self.list_sb.pack(side="right", fill="y")
         self.list_cv.pack(side="top", fill="both", expand=True)
+        self.list_cv.configure(yscrollcommand=self.list_sb.set)
         self.list_cv.bind("<Configure>", lambda e: self.debounce("list", self.refresh_tasks))
         self.list_cv.bind("<MouseWheel>", self.on_list_wheel)
         self.list_cv.bind("<Button-4>", lambda e: self.on_list_wheel(e, -1))
@@ -2785,6 +2802,31 @@ class NoteApp(object):
         lo = getattr(self, "_chat_min", 0)          # 最旧消息处，不许再往上
         new = max(lo, min(4, cur + direction * 14))
         self.render_messages(offset=new)
+
+    # v1.9.9.32：聊天区滚动条。消息是按像素 offset 手画的（不走 yview），
+    # 所以滚动条两端都自己接：set() 由渲染后回调同步滑块位置，
+    # command 把滑块比例换算回 offset 再重画。
+    def _chat_sb_sync(self, first, last):
+        lo = getattr(self, "_chat_min", 0)
+        if lo >= 0:                      # 内容没超出可视区，滑块铺满（等于禁用）
+            try:
+                self.chat_sb.set(0.0, 1.0)
+            except tk.TclError:
+                pass
+            return
+        total_span = float(4 - lo)
+        f = (getattr(self, "_chat_offset", 0) - lo) / total_span
+        f = min(max(f, 0.0), 1.0)
+        try:
+            self.chat_sb.set(f, 1.0)
+        except tk.TclError:
+            pass
+
+    def _chat_scroll(self, first, last):
+        lo = getattr(self, "_chat_min", 0)
+        if lo >= 0:
+            return
+        self.render_messages(offset=lo + float(first) * (4 - lo))
 
     # ---------------- 输入
     def placeholder_tick(self):
@@ -4476,34 +4518,26 @@ class NoteApp(object):
         return self._praise(tr("done_ok", title=task["title"]))
 
     def _handle_complete(self, text, parsed_now, pz):
-        """勾选意图。返回 (handled, reply)"""
-        is_done, is_soft = self._is_done_intent(text, pz)
-        if not is_done:
-            return False, None
+        """勾选意图。v1.9.9.32：对话不再打勾（用户实测反馈「很乱」）——
+        打卡/完成一律在清单里手动打勾。
 
-        # 序号形式优先（「完成第一个」「做完了第二条」），
-        # 否则会被当成叫「第二条」的任务名
+        现在只做两件事：
+        1. 纯打卡话（「背单词打卡了」「签到」）→ 回一句提示，**不建任务**
+           （原来会建出叫「背单词打卡」的临时任务）；
+        2. 「完成X」这类动词句 → 放行 (False)，交给建任务流程——
+           用户的心智模型里「完成数学作业」就是一条新任务。
+        返回 (handled, reply)"""
+        if len(text or "") > 24:
+            return False, None
+        # 序号勾选（「完成第一个」）仍保留：这是明确指向已有任务的操作
         if re.search(r"第\s*(?:[0-9]+|[一二三四五六七八九十]{1,3})\s*[个条项件]?",
-                     text or ""):
+                     text or "") and re.search(
+                     r"(完成|做完|勾掉|勾了|办好)", text or ""):
             idx_title = self._done_by_index(text)
             if idx_title is not None:
                 return True, idx_title
-
-        done_title = self._done_target(text, parsed_now, pz)
-        if done_title is None:
-            # 抽不出任务名：硬完成语给「没找到」，软完成语放行（可能是新任务）
-            if not is_soft:
-                return True, tr("done_notfound", title=(text or "").strip())
-            return False, None
-
-        for task in self.store.tasks:
-            if self._match(done_title, task["title"]):
-                if not task.get("done"):
-                    return True, self._finish_task(task)
-                break
-        if not is_soft:
-            return True, tr("done_notfound", title=done_title)
-        # 软完成语且没匹配上 → 这是新任务（「买牛奶」）
+        if re.search(r"(打个?卡|打卡|签到|签个到)", text or ""):
+            return True, tr("checkin_hint")
         return False, None
 
     # ---------------- 其余任务操作（v1.9.9.29 重构）
@@ -4768,7 +4802,10 @@ class NoteApp(object):
                 return tr("dup_ask", title=similar, new=new_title)
             dup = None
             for task in self.store.tasks:
-                if task["title"] == title and not task.get("done"):
+                # v1.9.9.32：日常任务即使今天已打卡（done=True）也算同名，
+                # 再输入「完成数学作业」是更新它，不是再建一条
+                if task["title"] == title and (not task.get("done")
+                                               or task.get("repeat")):
                     dup = task
                     break
             if dup:
@@ -5231,12 +5268,16 @@ class NoteApp(object):
         cv.create_text(8, y + h / 2, text=txt, anchor="w",
                        font=self.f_tiny, fill=col)
         if gname == "daily":
-            # 日常组头右侧写「今日 x/y」，一眼知道今天打卡进度
-            items = items or []
-            n = len(items)
-            dn = sum(1 for _i, t in items if t.get("done"))
-            if n:
-                cv.create_text(w - 8, y + h / 2, text=tr("daily_progress", d=dn, n=n),
+            # 日常组头右侧写「今日完成 x/y」——v1.9.9.32 起与底栏计数
+            # 同一套口径（_daily_counts：只数今天该做的），修掉
+            # 「底栏 0/2、组头 1/3」对不上的问题；今天不该做的
+            # （如周二的每周一三五）不计入分母
+            try:
+                _n, _dn, _tmp = self._daily_counts()
+            except Exception:
+                _n, _dn = len(items or []), 0
+            if _n:
+                cv.create_text(w - 8, y + h / 2, text=tr("daily_progress", d=_dn, n=_n),
                                anchor="e", font=self.f_tiny, fill=col)
         tw = self.text_width(txt, self.f_tiny) + 16
         cv.create_line(tw, y + h / 2, w - 8, y + h / 2,
@@ -7016,6 +7057,11 @@ class NoteApp(object):
                                   bg=C.ROW2, fg=C.TEXT, buttonbackground=C.ROW2,
                                   relief="flat", justify="center")
         self._cal_ms.pack(side="left", padx=2)
+        # v1.9.9.32：跳转框初始值应该是当前年月，不是 1970/1
+        self._cal_ys.delete(0, "end")
+        self._cal_ys.insert(0, str(self._cal_y))
+        self._cal_ms.delete(0, "end")
+        self._cal_ms.insert(0, str(self._cal_m))
         # 确认按钮：输完年月点一下才跳（Spinbox 的箭头不再即时跳转）
         tk.Button(quick, text=tr("cal_jump_go"), bg=C.ROW2, fg=C.TEXT,
                   relief="flat", padx=6,
@@ -7088,13 +7134,19 @@ class NoteApp(object):
             if t.get("day"):
                 busy.add(t["day"])
         # 重复任务：把未来 60 天内命中的日期都标上（每天/每周X）
-        _rep_tasks = [t for t in self.store.tasks if (t.get("repeat") or "").find("每") >= 0]
+        # v1.9.9.32：repeat 现在是 dict（{"kind":...}），旧代码
+        # `(rep or "").find("每")` 直接 AttributeError，整个日历崩成空白
+        _rep_tasks = [t for t in self.store.tasks if t.get("repeat")]
         if _rep_tasks:
             _start = dt.date.today()
             for _i in range(60):
                 _d = _start + dt.timedelta(days=_i)
-                if self._cal_day_items(_d.isoformat()):
-                    busy.add(_d.isoformat())
+                for _t in _rep_tasks:
+                    if _t.get("day") and _t["day"] > _d.isoformat():
+                        continue      # 还没创建的任务不外推
+                    if self._daily_due_today(_t, _d):
+                        busy.add(_d.isoformat())
+                        break
         # 今天的日常若已全部打卡，圆点改成空心（○ = 还没打卡，● = 打完了）
         try:
             _n, _dn, _tmp = self._daily_counts()
@@ -7168,6 +7220,12 @@ class NoteApp(object):
         rep = task.get("repeat")
         if not rep:
             return False
+        # v1.9.9.32：旧版本数据里 repeat 是字符串（「每周三」）——
+        # 统一先归一化成 dict，否则 repeat_due_today 会崩
+        if isinstance(rep, str):
+            rep = core.find_repeat(rep)
+            if rep is None:
+                return True
         try:
             return core.repeat_due_today(rep, day)
         except Exception:
@@ -7238,17 +7296,14 @@ class NoteApp(object):
             if t.get("day") == ds or t.get("due_date") == ds:
                 items.append(t)
                 continue
-            rep = t.get("repeat") or ""
-            if not rep or t.get("day"):
-                # 有创建日的非重复任务不外推；重复任务也要求创建日 ≤ 当天
-                if not rep or (t.get("day") or "") > ds:
-                    continue
-            if "每" in rep and ("天" in rep or "日" in rep):
+            # v1.9.9.32：repeat 是 dict，旧的 `"每" in rep` 字符串判断
+            # 永远为 False → 日常任务在日历上只有创建日有一天
+            if not t.get("repeat"):
+                continue
+            if (t.get("day") or "") > ds:
+                continue      # 还没创建的任务不外推
+            if self._daily_due_today(t, d):
                 items.append(t)
-            else:
-                wd = "一二三四五六日"[d.weekday()]
-                if wd in rep or ("周" in rep and "末" in rep and d.weekday() >= 5):
-                    items.append(t)
         return items
 
     def _cal_show_day(self, ds):

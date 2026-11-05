@@ -1242,28 +1242,30 @@ class TestV199925CoreTrust:
         assert a._pending_task is None and a._pending_q is None
 
     # ---- P0-4
+    # v1.9.9.32：对话不再打勾（用户实测反馈「很乱」）——
+    # 「完成X」一律当新任务，「X完成了 / 搞定了X」也不再碰已有任务
     def test_done_order_prefix(self, app):
-        """「完成数学作业」勾掉已有任务，不新建"""
+        """「完成数学作业」= 新任务，不再勾掉已有的「数学作业」"""
         a = self._fresh(app)
         self._mk(a, "数学作业")
         a.respond("完成数学作业")
-        assert len(a.store.tasks) == 1, "多建了任务：" + str([t["title"] for t in a.store.tasks])
-        assert a.store.tasks[0]["done"]
+        a.respond("就这个")            # 相似任务保护会先问一句
+        assert all(not t["done"] for t in a.store.tasks), "对话不该打勾"
+        assert any("数学作业" in t["title"] for t in a.store.tasks)
 
     def test_done_order_suffix(self, app):
-        """「数学作业完成了」勾掉，不新建"""
+        """「数学作业完成了」不再勾掉已有任务"""
         a = self._fresh(app)
         self._mk(a, "数学作业")
         a.respond("数学作业完成了")
-        assert len(a.store.tasks) == 1
-        assert a.store.tasks[0]["done"]
+        assert not a.store.tasks[0]["done"], "对话不该打勾"
 
     def test_done_gaoding(self, app):
-        """「搞定了报告」勾掉报告"""
+        """「搞定了报告」不再勾掉报告"""
         a = self._fresh(app)
         self._mk(a, "报告")
         a.respond("搞定了报告")
-        assert a.store.tasks[0]["done"]
+        assert not a.store.tasks[0]["done"], "对话不该打勾"
 
     def test_done_by_index(self, app):
         """「完成第一个」「做完了第二条」按顺序勾掉"""
@@ -1638,16 +1640,15 @@ class TestV199928UserAudit:
 
     # ---- 打卡的所有说法
     def test_check_in_variants(self, app):
-        """「背单词打卡了 / 打个卡 背单词 / 今天做了背单词」都要认"""
+        """v1.9.9.32：打卡类的话不再打勾、也不建「背单词打卡」这种任务，
+        统一回一句提示引导去清单手动勾"""
         for w in ("背单词打卡了", "打个卡 背单词", "今日背单词打卡", "今天做了背单词"):
             a = self._fresh(app)
             a.respond("每天早上八点背单词")
             a.respond("不用")
-            before = len(a.store.tasks)
             a.respond(w)
-            t = a.store.tasks[0]
-            assert len(a.store.tasks) == before, "%s 新建了任务" % w
-            assert t["done"] is True, "%s 没打卡：%s" % (w, [x["title"] for x in a.store.tasks])
+            titles = [t["title"] for t in a.store.tasks]
+            assert titles == ["背单词"], "%s 产生了副作用：%s" % (w, titles)
 
     def test_check_in_not_swallow_new_task(self, app):
         """「买牛奶」不能被当成「买」+ 完成语"""
@@ -1699,6 +1700,8 @@ class TestV199928UserAudit:
         a = self._fresh(app)
         a.respond("每天早上八点背单词")
         a.respond("不用")
-        a.respond("背单词打卡了")
+        # v1.9.9.32：打卡改在清单里手动勾（直接调内部打卡，模拟点方框）
+        a._daily_toggle(a.store.tasks[0])
+        a.store.save()
         r = a.respond("今天做了什么")
         assert "背单词" in (r or ""), r
