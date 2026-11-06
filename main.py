@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.41"
+VERSION = "1.9.9.42"
 
 # 对话消息最多保留条数。v1.9.9.40 及以前是 60——聊天一多旧记录
 # 被三处 [-60:] 硬裁剪**永久删除**（读盘/写盘/追加各一处），用户
@@ -1454,12 +1454,27 @@ class NoteApp(object):
         self._build_fonts()
 
     def _build_fonts(self):
-        """按 store.font_scale（0.8~1.3）构建各处字号；字体大小滑块实时调用"""
+        """按 store.font_scale（0.8~1.3）构建各处字号；字体大小滑块实时调用
+
+        v1.9.9.42 两处关键改动：
+        ① 改为**命名 Font 对象**并 configure() 原地改字号——所有引用同一
+           字体的控件在滑块拖动瞬间同步更新。旧版只换元组，已创建的
+           控件纹丝不动，界面大部分区域「字体大小调了没反应」就是它。
+        ② 小字号整体上调一档：旧版界面文字 7/8pt（约 9/11px），对话区
+           却是 9pt（12px）；雅黑在 10px 以下抗锯齿很糟，正是用户说的
+           「马赛克感」。现在界面文字 9pt、辅助文字 8pt，与对话一致。"""
         sc = float(getattr(self.store, "font_scale", 1.0) or 1.0)
-        self.f_task = (self.f_ui, max(8, round(10 * sc)))
-        self.f_small = (self.f_ui, max(7, round(8 * sc)))
-        self.f_tiny = (self.f_ui, max(6, round(7 * sc)))
-        self.f_chat = (self.f_ui, max(8, round(9 * sc)))
+        for name, px in (("f_task", max(8, round(10 * sc))),
+                         ("f_small", max(8, round(9 * sc))),
+                         ("f_tiny", max(7, round(8 * sc))),
+                         ("f_chat", max(8, round(9 * sc)))):
+            f = getattr(self, "_" + name + "_f", None)
+            if f is None:
+                f = tkfont.Font(root=self.root, family=self.f_ui, size=px)
+                setattr(self, "_" + name + "_f", f)
+            else:
+                f.configure(family=self.f_ui, size=px)
+            setattr(self, name, f)
 
     # ---------------- 骨架
     def build_ui(self):
@@ -1471,7 +1486,7 @@ class NoteApp(object):
                                bg=C.BG, fg=C.SUB, font=self.f_tiny, anchor="w")
         self.f_note.pack(side="left")
         self.quote_lbl = tk.Label(self.quote_row, text="", bg=C.BG, fg=C.SUB,
-                                  font=(self.f_ui, 8), anchor="e", justify="right",
+                                  font=self.f_tiny, anchor="e", justify="right",
                                   wraplength=300)
         self.quote_lbl.pack(side="right", fill="x", expand=True)
         self.quote_row.bind("<Button-1>", lambda e: self.roll_quote(manual=True))
@@ -2732,7 +2747,10 @@ class NoteApp(object):
         self.render_messages()
 
     def real_font(self, spec):
-        """带缓存的 Font 获取：同一 spec 只创建一次（此前每次新建导致严重卡顿）"""
+        """带缓存的 Font 获取：同一 spec 只创建一次（此前每次新建导致严重卡顿）
+        v1.9.9.42：spec 本身已是命名 Font 对象时直接返回（ measure 走缓存）"""
+        if isinstance(spec, tkfont.Font):
+            return spec
         cache = getattr(self, "_font_cache", None)
         if cache is None:
             cache = self._font_cache = {}
@@ -3297,11 +3315,19 @@ class NoteApp(object):
             self.refresh_tasks(scroll_top=True)
             self._remind_now(task)
             self._pending_task = None
+            # v1.9.9.42：这里必须清 _pending_q！v1.9.9.40 给 mode dl 单独
+            # 出问法时只清了 _pending_task，_pending_q 还留着 "expired"，
+            # 于是「确认」之后的下一句话被当成确认问答吃掉（用户实测：
+            # 确认完时间再说话，回复「已取消当前的操作」）。队列里若还有
+            # 别的过期项，_next_ask 会重新挂上状态。
+            self._pending_q = None
             # v1.9.9.3：确认把时间设上后，说「撤回」= 清掉这个时间
             # （与「刚设过时间就撤回」的全局语义一致）；注意不能记 hhmm=None，
             # 否则会被「没时间别装撤过」防谎话分支判成无可撤回
             self._push_undo({"kind": "deadline", "id": task["id"]})
-            return tr("dl_expired_added", t=task["title"])
+            _nxt = _next_ask()
+            _msg = tr("dl_expired_added", t=task["title"])
+            return (_msg + "\n" + _nxt) if _nxt else _msg
         # 没听懂：再问一遍（mode==dl 用「时间设不设」的问法，v1.9.9.40）
         self._pending_expired = pe
         return tr("dl_expired_keep" if pe.get("mode") == "dl" else "dl_expired",
@@ -7542,10 +7568,10 @@ class NoteApp(object):
             # 休 / 班 角标
             if hol == "休":
                 cv.create_text(x0 + cw - 14, y0 + 12, text="休",
-                               font=(self.f_ui, 8), fill="#E2434B", tags=(tag,))
+                               font=self.f_tiny, fill="#E2434B", tags=(tag,))
             elif hol == "班":
                 cv.create_text(x0 + cw - 14, y0 + 12, text="班",
-                               font=(self.f_ui, 8), fill="#3E8ED0", tags=(tag,))
+                               font=self.f_tiny, fill="#3E8ED0", tags=(tag,))
             # 节日名
             if fest:
                 cv.create_text(x0 + cw / 2, y0 + 44, text=fest,

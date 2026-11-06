@@ -59,10 +59,17 @@ def say(app, text, max_confirm=6):
     """
     r = app.respond(text)
     n = 0
-    while isinstance(r, str) and "过截止日期" in r and n < max_confirm:
+    while isinstance(r, str) and _is_expired_ask(r) and n < max_confirm:
         r = app.respond("确认")
         n += 1
     return r
+
+
+def _is_expired_ask(r):
+    """v1.9.9.42：过期确认有两套问法——任务未入库「…已过截止日期…」，
+    已在待办「…的时间已经过了今天…」。只认前一种会让「晚上八点」
+    这类用例在 20:00 之后假失败（时间依赖）"""
+    return isinstance(r, str) and ("过截止日期" in r or "已经过了今天" in r)
 
 
 def settle(app):
@@ -311,7 +318,7 @@ class TestUndoSemantics:
         """刚设过时间，说「撤回」= 清时间并重新追问"""
         app.respond("交周报")
         r = app.respond("B 晚上八点")
-        if isinstance(r, str) and "过截止日期" in r:
+        if _is_expired_ask(r):
             r = app.respond("确认")        # 已过点就确认保留（时间不依赖）
         assert app.store.tasks[0]["hhmm"] == "20:00"
         settle(app)
@@ -1878,3 +1885,58 @@ class TestV199941:
         thumb = st.lookup("Vertical.TScrollbar", "background")
         assert thumb.lower() == st.lookup(
             "Vertical.TScrollbar", "lightcolor").lower()
+
+
+# =====================================================================
+# v1.9.9.42 字体清晰度 / 跟随滑块 + 过期确认后的状态泄漏
+#   ① 界面小字号 7/8pt 在雅黑下渲染成 9~11px，比对话（9pt/12px）糙，
+#      统一上调一档后与对话一致；
+#   ② 旧版 _build_fonts 只换字号元组，已创建控件引用旧字体，滑块
+#      「调了跟没调一样」——改为命名 Font 对象后必须同步生效；
+#   ③ 「已在待办的任务」确认过期时间后 _pending_q 未清空，下一句话
+#      被当成确认问答吞掉（v1.9.9.40 引入的状态泄漏）。
+# =====================================================================
+class TestV199942:
+    def test_ui_fonts_as_clear_as_chat(self, app):
+        a = app
+        sz = lambda f: int(f.cget("size"))       # noqa: E731
+        # 界面文字不小于对话字号（同尺寸才能保证同样的渲染清晰度）
+        assert sz(a.f_small) >= sz(a.f_chat), (sz(a.f_small), sz(a.f_chat))
+        # 辅助文字最多小一档（8pt vs 9pt），不再出现 7pt
+        assert sz(a.f_tiny) >= sz(a.f_chat) - 1, (sz(a.f_tiny), sz(a.f_chat))
+        assert sz(a.f_tiny) >= 8
+
+    def test_font_slider_updates_existing_widgets(self, app):
+        """拖字号滑块，早已创建好的标签（tab/底栏）必须跟着变"""
+        import tkinter.font as tkfont
+        a = app
+        def wsize(lbl):
+            f = lbl.cget("font")
+            name = f if isinstance(f, str) else str(f)
+            return int(tkfont.nametofont(name).cget("size"))
+
+        before = wsize(a.tab_todo)
+        a.store.font_scale = 1.2
+        a._build_fonts()
+        a.root.update()
+        after = wsize(a.tab_todo)
+        assert after > before, (before, after)
+        # 底栏按钮同样跟随（同一命名 Font 共享）
+        assert wsize(a.hist_btn) == int(a.f_tiny.cget("size"))
+
+    def test_expired_confirm_releases_pending(self, app):
+        """确认过期时间后状态必须释放，下一句话是正常输入"""
+        a = app
+        a.store.tasks = [{"id": "t1", "title": "交周报", "hhmm": None,
+                          "due_date": None, "deadline_txt": None,
+                          "repeat": None, "score": 45, "manual": True,
+                          "done": False, "day": a.store._today(),
+                          "created": "09:00", "dur": None}]
+        a._pending_q = "expired"
+        a._pending_expired = {"mode": "dl", "id": "t1", "hhmm": "19:00", "due": None}
+        a.respond("确认")
+        assert a.store.tasks[0]["hhmm"] == "19:00"
+        assert getattr(a, "_pending_q", None) is None, "确认后 pending 状态没释放"
+        a.respond("买牛奶")
+        assert any(t["title"] == "买牛奶" for t in a.store.tasks), \
+            [(t["title"], t.get("hhmm")) for t in a.store.tasks]
