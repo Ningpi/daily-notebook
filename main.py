@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.38"
+VERSION = "1.9.9.39"
 
 
 # ----------------------------------------------------------------- 配色
@@ -2021,17 +2021,23 @@ class NoteApp(object):
 
     # ---------------- 换肤
     def _style_scrollbars(self):
-        """v1.9.9.35：滚动条跟随主题配色——滑块（可拖动件）颜色比底槽深，
-        悬停变主题强调色，一眼能认出「这里能拖」"""
+        """滚动条配色（v1.9.9.39 重做）：旧版底槽 = 背景色，轨道完全隐形，
+        只剩一块浅色滑块悬在半空，看不出「这是滚动条」。
+        现在：底槽比背景深一档（轨道可见），滑块统一一种明显更深的颜色，
+        悬停/按下才变主题强调色——三档色阶一眼分层。"""
         try:
             style = ttk.Style(self.root)
             if style.theme_use() != "clam":
                 style.theme_use("clam")     # clam 才允许逐项配色
+            thumb = _mix(C.LINE, C.TEXT, 0.32)      # 滑块：明显深于轨道
+            trough = _mix(C.BG, C.SUB, 0.20)        # 底槽：比背景深一档
             style.configure("Vertical.TScrollbar",
-                            background=C.LINE,          # 滑块：深一档
-                            troughcolor=C.BG,           # 底槽：背景色
-                            bordercolor=C.BG,
-                            arrowcolor=C.SUB,
+                            background=thumb,
+                            troughcolor=trough,
+                            bordercolor=trough,
+                            lightcolor=thumb,       # clam 的立体边也压平，
+                            darkcolor=thumb,        # 整个滑块统一一种颜色
+                            arrowcolor=_mix(C.SUB, C.TEXT, 0.30),
                             relief="flat")
             style.map("Vertical.TScrollbar",
                       background=[("active", C.ACCENT),
@@ -2621,6 +2627,18 @@ class NoteApp(object):
 
     def render_messages(self, offset=None):
         cv = self.chat_cv
+        # v1.9.9.39：首次渲染发生在窗口映射之前，winfo_height() 还是 1，
+        # 旧代码退到 40px 假视口算 offset，而滑块同步却用真实高度——
+        # 两边比例对不上，表现就是「初始状态滑块悬在中间/奇怪位置」。
+        # 现在高度未知时先不画，等 <Map>/尺寸就绪后用真实高度补画。
+        if cv.winfo_height() <= 1:
+            cv.delete("all")
+            if not getattr(self, "_chat_defer_armed", False):
+                self._chat_defer_armed = True
+                cv.bind("<Map>", self._chat_map_redraw, add="+")
+                cv.after(120, self._chat_map_redraw)   # 兜底：防个别环境不发 Map
+            return
+        self._chat_defer_armed = False
         cv.delete("all")
         w = max(cv.winfo_width(), 40)
         h = max(cv.winfo_height(), 40)
@@ -2670,6 +2688,13 @@ class NoteApp(object):
                 ty += line_h
             y += bh + 5
         self._chat_sb_sync()                 # v1.9.9.38：滑块随内容实时同步
+
+    def _chat_map_redraw(self, _e=None):
+        """窗口映射/尺寸就绪后的补画入口（v1.9.9.39，配合 render_messages 的
+        「高度未知先不画」）：尺寸还没就绪时静候下一次 <Map>。"""
+        if self.chat_cv.winfo_height() <= 1:
+            return
+        self.render_messages()
 
     def real_font(self, spec):
         """带缓存的 Font 获取：同一 spec 只创建一次（此前每次新建导致严重卡顿）"""

@@ -1705,3 +1705,51 @@ class TestV199928UserAudit:
         a.store.save()
         r = a.respond("今天做了什么")
         assert "背单词" in (r or ""), r
+
+
+# =====================================================================
+# v1.9.9.39 滚动条两项：
+#   ① 初始滑块悬在中间 —— 首次渲染在窗口映射前，视口高度拿不到，旧代码
+#      用 40px 假视口算 offset，滑块比例与实际内容错位。
+#   ② 底槽颜色 = 背景色，轨道隐形，只剩浅色滑块难辨认。
+# =====================================================================
+class TestV199939Scrollbar:
+    def _fill_chat(self, app, n=6):
+        for i in range(n):
+            app.handle_user_text("第%d条消息，这句话故意写长一点用来撑高度" % i)
+        app.root.update()
+
+    def test_no_draw_before_mapped(self, app):
+        """映射前（视口高度未知）不允许用假高度画错位内容"""
+        import tkinter as tk
+        root = tk.Tk()
+        try:
+            a = M.NoteApp(root)
+            # 未 update：winfo_height 仍是 1，画布必须留空（延迟到尺寸就绪）
+            assert a.chat_cv.winfo_height() <= 1
+            assert not a.chat_cv.find_all()
+        finally:
+            root.destroy()
+
+    def test_thumb_bottom_on_start(self, app):
+        """启动渲染完成后，内容超出视口时滑块必须贴底（正看着最新消息）"""
+        self._fill_chat(app)
+        f, l = app.chat_sb.get()
+        assert abs(l - 1.0) < 0.02, (f, l)       # 底边贴底
+        assert f > 0.3, (f, l)                   # 且确实滚过了一段（不在顶部/悬空）
+
+    def test_thumb_full_when_content_fits(self, app):
+        """内容没超出视口：滑块铺满（无可滚动）"""
+        f, l = app.chat_sb.get()
+        assert (f, l) == (0.0, 1.0), (f, l)
+
+    def test_scrollbar_colors_layered(self, app):
+        """三档色阶：底槽 ≠ 背景、滑块 ≠ 底槽（轨道可见、滑块可认）"""
+        import tkinter.ttk as ttk
+        import themes as palette
+        st = ttk.Style(app.root)
+        bg = palette.get(app.store.theme)["bg"]
+        trough = st.lookup("Vertical.TScrollbar", "troughcolor")
+        thumb = st.lookup("Vertical.TScrollbar", "background")
+        assert trough.lower() != bg.lower(), (trough, bg)
+        assert thumb.lower() != trough.lower(), (thumb, trough)
