@@ -1753,3 +1753,80 @@ class TestV199939Scrollbar:
         thumb = st.lookup("Vertical.TScrollbar", "background")
         assert trough.lower() != bg.lower(), (trough, bg)
         assert thumb.lower() != trough.lower(), (thumb, trough)
+
+
+# =====================================================================
+# v1.9.9.40 四项：
+#   ① 桌面气泡右键 → 显示主窗口（窗口收进托盘后的找回入口）
+#   ② 右键「修改时间」输入「每天早上七点」→ 任务转日常（旧版丢掉「每天」）
+#   ③ 优先级回答「B，每天早上八点」→ 转日常任务，不再误报「已过截止日期」
+#   ④ 日历圆点区分日常（青绿）/临时（深金），两种都有并排两点 + 图例
+# =====================================================================
+class TestV199940:
+    def test_bubble_rightclick_menu(self, app):
+        app.root.update()
+        app._ensure_bubble()          # 正常启动 600ms 后才建，测试里直接建
+        b = getattr(app, "_bubble", None)
+        assert b is not None and b.alive()
+        assert callable(getattr(b, "_popup_menu", None))
+        # 右键绑定到了气泡主体上
+        assert b.main.bind("<Button-3>")
+
+    def test_new_time_converts_to_daily(self, app):
+        a = app
+        a.store.tasks.append({"id": "t1", "title": "语文作业", "hhmm": None,
+                              "due_date": None, "deadline_txt": None,
+                              "repeat": None, "score": 45, "manual": True,
+                              "done": False, "day": a.store._today(),
+                              "created": "09:00", "dur": None})
+        task = a.store.tasks[0]
+        dl = a._apply_new_time(task, "每天早上七点")
+        assert dl is not None
+        assert task["repeat"] and task["repeat"]["kind"] == "daily"
+        assert task["hhmm"] == "07:00"
+        assert task["due_date"] is None
+        # 撤回 → 恢复成原来的临时任务（无 repeat）
+        r = a._do_undo("deadline")
+        assert task.get("repeat") in (None, {},)
+        assert task.get("hhmm") is None
+
+    def test_pri_answer_with_repeat_makes_daily(self, app):
+        a = app
+        a.store.tasks = []
+        a.store.save()
+        for k in ("_pending_q", "_pending_task", "_pending_expired"):
+            setattr(a, k, None)
+        a.respond("参加会义")          # 建任务，进优先级追问
+        a.respond("B，每天早上八点")   # 回答里带「每天」
+        tasks = [t for t in a.store.tasks if t["title"] == "参加会义"]
+        assert len(tasks) == 1
+        t0 = tasks[0]
+        assert t0.get("repeat") and t0["repeat"]["kind"] == "daily", t0
+        assert t0.get("hhmm") == "08:00"
+        # 关键：不能弹「已过截止日期」确认
+        assert getattr(a, "_pending_q", None) != "expired"
+
+    def test_calendar_dot_colors(self, app):
+        a = app
+        a.store.tasks = [
+            {"id": "d1", "title": "背单词", "hhmm": "08:00", "repeat":
+                {"kind": "daily", "weekday": None, "monthday": None},
+             "day": a.store._today(), "due_date": None, "done": False,
+             "score": 20, "manual": False},
+            {"id": "t1", "title": "交房租", "hhmm": None, "repeat": None,
+             "day": a.store._today(), "due_date": None, "done": False,
+             "score": 45, "manual": False},
+        ]
+        a.open_calendar_view()
+        a.root.update()
+        a._draw_calendar()
+        cv = a._cal_cv
+        fills = set()
+        for it in cv.find_all():
+            try:
+                if cv.type(it) == "oval":
+                    fills.add(cv.itemcget(it, "fill"))
+            except Exception:
+                pass
+        assert "#2F8F83" in fills          # 日常青绿点
+        assert a._cal_legend_daily.cget("fg").lower() == "#2f8f83"

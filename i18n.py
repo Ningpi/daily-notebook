@@ -116,6 +116,11 @@ STRINGS = {
                      "Is \"{t}\" in the morning or the afternoon? Reply \"am\" or \"pm\"."),
     "meridiem_ok": ("好的，按{p}的「{t}」记下了。", "Got it — {p} for \"{t}\"."),
     "meridiem_skip": ("好的，这条就不记了。", "Okay, skipped."),
+    # v1.9.9.40：日历圆点图例
+    "cal_legend_daily": ("日常", "Daily"),
+    "cal_legend_temp": ("待办", "One-off"),
+    # v1.9.9.40：桌面气泡右键菜单
+    "bubble_toggle": ("展开 / 收起任务", "Expand / Collapse tasks"),
     "cal_today": ("今天", "Today"),
     "cal_off": ("放假", "Off"),
     "cal_work": ("调休上班", "Workday"),
@@ -181,6 +186,14 @@ STRINGS = {
     # 一句话里有多条过期任务时，告知还有几条要确认（v1.9.9）
     "dl_expired_more": ("（另外还有 {n} 条待确认）",
                         " ({n} more to confirm)"),
+    # v1.9.9.40：任务已在待办里时，「已过时间」确认的准确问法——
+    # 问的是「时间设不设」，不是「加不加入」（旧文案让用户以为
+    # 回「不用」能不建任务，结果任务还在，非常困惑）
+    "dl_expired_keep": ("【{t}】的时间已经过了今天，还要按这个时间设吗？（确认 / 不用）",
+                        "That time has already passed today. Keep it for \"{t}\"? (yes / no)"),
+    # v1.9.9.40：回答/改时间带「每天/每周X」→ 任务转日常
+    "dl_set_rep": ("好的，【{t}】已改为{r} {d} 的日常任务。",
+                   "Done, \"{t}\" is now a {r} task at {d}."),
     # 追问环节（任务已在待办里）拒绝过期时间：只清时间，任务保留（v1.9.5）
     "dl_expired_task_kept": ("好的，【{t}】的时间已经过截止日期，先不设这个截止时间，任务已留在待办里。说「撤回」可以撤销刚才的设置。",
                              "That time has passed, so \"{t}\" stays in the list without a deadline. Say \"undo\" to revert."),
@@ -239,7 +252,7 @@ STRINGS = {
     # v1.9.9.35：右键「修改时间」
     "menu_time": ("修改时间", "Change time"),
     "time_ask": ("【{t}】改成什么时间？", "New time for \"{t}\"?"),
-    "time_hint": ("如 21:30 / 晚上九点半 / 明天下午3点", "e.g. 21:30 / 9:30pm / 3pm tomorrow"),
+    "time_hint": ("如 21:30 / 晚上九点半 / 明天下午3点 / 每天早上七点", "e.g. 21:30 / 9:30pm / 3pm tomorrow / 7am every day"),
     "time_bad": ("没看懂「{s}」，再试一次如「21:30」或「明天下午3点」",
                  "Didn't get \"{s}\" — try like 21:30 or 3pm tomorrow"),
     "menu_delete": ("删除", "Delete"),

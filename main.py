@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.39"
+VERSION = "1.9.9.40"
 
 
 # ----------------------------------------------------------------- 配色
@@ -781,6 +781,13 @@ class Bubble(object):
             self.ic_lbl.image = img
             self.ic_lbl.pack(side="right", padx=(0, 4))
             self.ic_lbl.bind("<Button-1>", lambda e: self.toggle())
+        # v1.9.9.40：右键气泡 = 菜单。主窗口收到托盘后，右下角这个气泡
+        # 是屏幕上唯一的可见入口，必须能右键找回主窗口
+        self._rb_targets = [self.main, self.count_lbl, self.txt_lbl]
+        if img is not None:
+            self._rb_targets.append(self.ic_lbl)
+        for w in self._rb_targets:
+            w.bind("<Button-3>", self._popup_menu)
         self._place()
         self.refresh()
 
@@ -808,6 +815,19 @@ class Bubble(object):
                 pass
 
     # ---- 基础
+    def _popup_menu(self, e):
+        """v1.9.9.40：右键桌面气泡——显示主窗口 / 记一条 / 展开(收起)任务"""
+        m = tk.Menu(self.win, tearoff=0)
+        m.add_command(label=tr("tray_show"), command=self.app.restore_from_tray)
+        m.add_command(label=tr("empty_add"),
+                      command=lambda: (self.app.restore_from_tray(),
+                                       self.app._focus_entry()))
+        m.add_command(label=tr("bubble_toggle"), command=self.toggle)
+        try:
+            m.tk_popup(e.x_root, e.y_root)
+        finally:
+            m.grab_release()
+
     def alive(self):
         try:
             return bool(self.win.winfo_exists())
@@ -3197,7 +3217,8 @@ class NoteApp(object):
                 self._pending_expired = nxt
                 self._pending_q = "expired"
                 _t = (nxt.get("task") or {}).get("title", "")
-                _m = tr("dl_expired", t=_t)
+                _m = tr("dl_expired_keep" if nxt.get("mode") == "dl"
+                        else "dl_expired", t=_t)
                 if _queue:
                     _m += tr("dl_expired_more", n=len(_queue) + 1)
                 return _m
@@ -3266,9 +3287,10 @@ class NoteApp(object):
             # 否则会被「没时间别装撤过」防谎话分支判成无可撤回
             self._push_undo({"kind": "deadline", "id": task["id"]})
             return tr("dl_expired_added", t=task["title"])
-        # 没听懂：再问一遍
+        # 没听懂：再问一遍（mode==dl 用「时间设不设」的问法，v1.9.9.40）
         self._pending_expired = pe
-        return tr("dl_expired", t=task["title"])
+        return tr("dl_expired_keep" if pe.get("mode") == "dl" else "dl_expired",
+                  t=(pe.get("task") or task or {}).get("title", ""))
 
 
     def _add_single(self, title, hhmm, score, dur, override=None):
@@ -3494,6 +3516,30 @@ class NoteApp(object):
             if not due_iso and eng_time["off"]:
                 due_iso = (dt.date.today() +
                            dt.timedelta(days=eng_time["off"])).isoformat()
+            # v1.9.9.40：回答里带「每天 / 每周X / 每月X号」→ 这是要把任务
+            # 变成日常任务，不是一次性截止时间。旧代码把「每天早上八点」
+            # 当成今天 8 点的截止时间，8 点一过就弹「已过截止日期」确认，
+            # 用户明明想设的是天天重复的日常
+            _rep = core.find_repeat(text or "")
+            if _rep is not None:
+                self._push_undo({"kind": "deadline", "id": task["id"],
+                                 "prev": {"repeat": task.get("repeat"),
+                                          "hhmm": task.get("hhmm"),
+                                          "due_date": task.get("due_date"),
+                                          "deadline_txt": task.get("deadline_txt")}})
+                task["repeat"] = _rep
+                task["hhmm"] = hhmm
+                task["due_date"] = None
+                task["deadline_txt"] = hhmm
+                task["_from_raw"] = False
+                task["reminded"] = False
+                task["reminded_day"] = None
+                self.store.save()
+                self.refresh_tasks(scroll_top=True)
+                replies.append(tr("dl_set_rep", t=task["title"],
+                                  r=self._repeat_text(_rep), d=hhmm))
+                need_dl = False
+                return True, "\n".join(replies), ""
             # 回答里没带日期时不覆盖原句带入的 due_date（如「明天交推文」+「B 晚上8点」）
             due_iso = due_iso or task.get("due_date")
             new_dl = hhmm
@@ -3516,7 +3562,8 @@ class NoteApp(object):
                 task["due_date"] = None
                 self.store.save()
                 self.refresh_tasks(scroll_top=True)
-                return True, tr("dl_expired", t=task["title"]), ""
+                # v1.9.9.40：任务已在待办里，问的是「时间设不设」不是「加不加入」
+                return True, tr("dl_expired_keep", t=task["title"]), ""
         elif time_m and need_dl:
             # 旧正则兜底（引擎没命中时，主要覆盖英文 am/pm 形式）
             hh, mm = time_m.group(2), time_m.group(3)
@@ -3552,7 +3599,8 @@ class NoteApp(object):
                 task["hhmm"] = None
                 self.store.save()
                 self.refresh_tasks(scroll_top=True)
-                return True, tr("dl_expired", t=task["title"]), ""
+                # v1.9.9.40：任务已在待办里，问的是「时间设不设」不是「加不加入」
+                return True, tr("dl_expired_keep", t=task["title"]), ""
         elif no_dl and need_dl:
             replies.append(tr("dl_none", t=task["title"]))
             need_dl = False
@@ -4329,6 +4377,19 @@ class NoteApp(object):
         # kind == deadline
         if task is None:
             return tr("undo_none")
+        # v1.9.9.40：「改成每天/每周X」这类时间修改的撤回——恢复整个
+        # prev 快照（含原 repeat/due_date），单纯的清时间不适用
+        if rec and rec.get("prev") is not None and "repeat" in rec["prev"]:
+            prev = rec["prev"]
+            task["repeat"] = prev.get("repeat")
+            task["hhmm"] = prev.get("hhmm")
+            task["due_date"] = prev.get("due_date")
+            task["deadline_txt"] = prev.get("deadline_txt")
+            task.pop("remind_before", None)
+            self.store.save()
+            self.refresh_tasks(scroll_top=True)
+            self._remind_asked_for = None
+            return tr("undo_dl_done", t=task["title"])
         # v1.9.9：任务本来就没有截止时间，就不要谎称「撤掉了截止时间」
         if not (task.get("hhmm") or task.get("due_date")):
             return tr("undo_no_dl", t=task["title"])
@@ -4680,12 +4741,33 @@ class NoteApp(object):
     # 由 _handle_task_ops 按顺序试——顺序即优先级，与代码位置无关。
     def _apply_new_time(self, task, when):
         """v1.9.9.35：把「新时间」写进任务（对话改时间和右键菜单共用）。
-        成功返回新的 deadline_txt；听不懂返回 None"""
+        成功返回新的 deadline_txt；听不懂返回 None
+
+        v1.9.9.40：输入里带「每天 / 每周X / 每月X号」→ 顺带把任务改成
+        日常任务（旧代码只提取钟点、「每天」被静默丢弃，用户明明说了
+        要改成日常却没生效）。"""
         _t = (core.find_times(when) or [None])[0]
         if not _t:
             return None
+        rep = core.find_repeat(when)         # v1.9.9.40
         _d = core.find_deadline_date(when)
+        # v1.9.9.40：快照必须记在改 hhmm 之前，否则撤回恢复的是新值
+        _prev = {"repeat": task.get("repeat"), "hhmm": task.get("hhmm"),
+                 "due_date": task.get("due_date"),
+                 "deadline_txt": task.get("deadline_txt")}
         task["hhmm"] = _t[0]
+        if rep is not None:
+            self._push_undo({"kind": "deadline", "id": task["id"],
+                             "prev": _prev})
+            task["repeat"] = rep
+            task["due_date"] = None          # 日常任务没有一次性截止日期
+            task["deadline_txt"] = _t[0]
+            task["_from_raw"] = False
+            task["reminded"] = False
+            task["reminded_day"] = None
+            self.store.save()
+            self.refresh_tasks()
+            return "%s %s" % (self._repeat_text(rep), _t[0])
         task["due_date"] = (_d[0].isoformat() if _d and _d[0]
                             else task.get("due_date"))
         task["deadline_txt"] = (task["due_date"] and
@@ -7317,6 +7399,17 @@ class NoteApp(object):
                   command=self._cal_jump).pack(side="left", padx=(4, 0))
         tk.Button(quick, text=tr("cal_today"), bg=C.ROW2, fg=C.TEXT, relief="flat",
                   command=self._cal_today).pack(side="right")
+        # v1.9.9.40：圆点图例——青绿=日常，深金=临时
+        lg = tk.Frame(win, bg=C.BG)
+        lg.pack(side="top", fill="x", padx=8, pady=(0, 1))
+        self._cal_legend_temp = tk.Label(
+            lg, text="● " + tr("cal_legend_temp"), bg=C.BG, fg=C.ACCENT,
+            font=self.f_tiny)
+        self._cal_legend_temp.pack(side="right")
+        self._cal_legend_daily = tk.Label(
+            lg, text="● " + tr("cal_legend_daily"), bg=C.BG, fg=C_DAILY,
+            font=self.f_tiny)
+        self._cal_legend_daily.pack(side="right", padx=(10, 0))
         self._cal_cv = tk.Canvas(win, bg=C.BG, highlightthickness=0)
         self._cal_cv.pack(side="top", fill="both", expand=True, padx=8, pady=(0, 2))
         # 拖动窗口时 Configure 会连续触发，直接重绘 = 重绘风暴（拖起来卡）。
@@ -7373,27 +7466,32 @@ class NoteApp(object):
         # 有日程的日期集合（截止日期 / 创建日 / 重复任务命中日）
         # v1.9.9.26：与 _cal_day_items 同源，避免「点上说没有安排」
         # v1.9.9.27：日常任务当天已打卡的日期单独记一份，画成空心圈
-        busy = set()
+        # v1.9.9.40：日常与临时分开记——圆点颜色区分（日常青绿/临时深金），
+        # 两种都有时并排画两个点
+        busy_daily = set()          # 日常任务（repeat）命中的日期
+        busy_temp = set()           # 临时任务的创建日 / 截止日
         daily_all_done = set()      # 当天日常全部打卡的日期（画空心圈）
         today_s = self.store._today()
         for t in self.store.tasks:
-            dd = t.get("due_date")
-            if dd:
-                busy.add(dd)
+            if t.get("repeat"):
+                continue            # 重复任务走下面的整月推算
+            if t.get("due_date"):
+                busy_temp.add(t["due_date"])
             if t.get("day"):
-                busy.add(t["day"])
+                busy_temp.add(t["day"])
         first0 = dt.date(y, m, 1)
         ndays0 = (dt.date(y + (m == 12), (m % 12) + 1, 1) - first0).days
         # v1.9.9.35：圆点改为**按显示的月份**整月计算——原来的
         # 「未来 60 天」上限是随便定的，2027 年 1 月就断档了
         for _i in range(ndays0):
             _d = first0 + dt.timedelta(days=_i)
-            if _d.isoformat() in busy:
+            _ds = _d.isoformat()
+            if _ds in busy_daily:
                 continue
             for _t in self.store.tasks:
-                if _t.get("repeat") and (_t.get("day") or "") <= _d.isoformat() \
+                if _t.get("repeat") and (_t.get("day") or "") <= _ds \
                         and self._daily_due_today(_t, _d):
-                    busy.add(_d.isoformat())
+                    busy_daily.add(_ds)
                     break
         # 今天的日常若已全部打卡，圆点改成空心（○ = 还没打卡，● = 打完了）
         try:
@@ -7440,15 +7538,26 @@ class NoteApp(object):
             # 有日程：小圆点（今天日常全部打完 → 空心圈，表示「已完成打卡」）
             # v1.9.9.35：圆点缩到 r=2.5 并压到格子底部——原来 r=3、
             # y0+ch-14 会压到节日名称（「元旦」和圆点叠在一起）
-            if ds in busy:
-                _x, _yc = x0 + cw / 2, y0 + ch - 9
-                if ds in daily_all_done:
-                    cv.create_oval(_x - 2.5, _yc - 2.5, _x + 2.5, _yc + 2.5,
-                                   outline=C_DAILY, width=1.4, tags=(tag,))
+            # v1.9.9.40：日常=青绿、临时=深金；两种都有 → 并排两点
+            has_d, has_t = ds in busy_daily, ds in busy_temp
+            if has_d or has_t:
+                _yc = y0 + ch - 9
+                _xc = x0 + cw / 2
+                if has_d and has_t:
+                    cv.create_oval(_xc - 5.9, _yc - 2.2, _xc - 1.5, _yc + 2.2,
+                                   fill=C_DAILY, outline="", tags=(tag,))
+                    cv.create_oval(_xc + 1.5, _yc - 2.2, _xc + 5.9, _yc + 2.2,
+                                   fill=C.ACCENT, outline="", tags=(tag,))
+                elif has_d:
+                    if ds in daily_all_done:
+                        cv.create_oval(_xc - 2.5, _yc - 2.5, _xc + 2.5, _yc + 2.5,
+                                       outline=C_DAILY, width=1.4, tags=(tag,))
+                    else:
+                        cv.create_oval(_xc - 2.5, _yc - 2.5, _xc + 2.5, _yc + 2.5,
+                                       fill=C_DAILY, outline="", tags=(tag,))
                 else:
-                    cv.create_oval(_x - 2.5, _yc - 2.5, _x + 2.5, _yc + 2.5,
-                                   fill=C_DAILY if ds == today_s else C.ACCENT,
-                                   outline="", tags=(tag,))
+                    cv.create_oval(_xc - 2.5, _yc - 2.5, _xc + 2.5, _yc + 2.5,
+                                   fill=C.ACCENT, outline="", tags=(tag,))
             # 点击日期 -> 底部显示当天安排
             cv.tag_bind(tag, "<Button-1>",
                         lambda e, dd=ds: self._cal_show_day(dd))
@@ -7581,7 +7690,9 @@ class NoteApp(object):
             # v1.9.9.35：原来只列前 3 件——4 件任务永远显示 3 件，
             # 用户以为漏了。放宽到 6 件（再多挤不下一行，以计数为准）
             for t in items[:6]:
-                mark = "✓" if t.get("done") else "·"
+                # v1.9.9.40：日常任务用 ◆ 标出，与圆点颜色呼应
+                mark = "✓" if t.get("done") else \
+                    ("◆" if t.get("repeat") else "·")
                 parts.append("  %s %s" % (mark, t["title"]))
         else:
             parts.append(tr("cal_day_empty"))
