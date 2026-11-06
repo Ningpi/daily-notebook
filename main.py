@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.37"
+VERSION = "1.9.9.38"
 
 
 # ----------------------------------------------------------------- 配色
@@ -2669,6 +2669,7 @@ class NoteApp(object):
                 cv.create_text(x1 + 8, ty, text=ln, anchor="nw", font=self.f_chat, fill=C.TEXT)
                 ty += line_h
             y += bh + 5
+        self._chat_sb_sync()                 # v1.9.9.38：滑块随内容实时同步
 
     def real_font(self, spec):
         """带缓存的 Font 获取：同一 spec 只创建一次（此前每次新建导致严重卡顿）"""
@@ -2861,19 +2862,29 @@ class NoteApp(object):
     # v1.9.9.32：聊天区滚动条。消息是按像素 offset 手画的（不走 yview），
     # 所以滚动条两端都自己接：set() 由渲染后回调同步滑块位置，
     # command 把滑块比例换算回 offset 再重画。
-    def _chat_sb_sync(self, first, last):
+    def _chat_sb_sync(self, first=None, last=None):
+        """把当前聊天滚动位置同步到右侧滑块（v1.9.9.38，常规滚动条语义）。
+
+        旧版两个致命伤：
+        · 永远 set(f, 1.0)——滑块底边粘死在底端、长度随 f 缩到 0；
+        · 这个函数挂在 yscrollcommand 上，但聊天画布根本没设
+          scrollregion，yview 永远不变 → 函数从未被调用 → 滑块永远
+          停在出厂的「铺满」态（铺满=无可滚动，拖了也没反应）。
+        现在渲染后手动调用；滑块长度 = 可视高/内容总高，位置 = 已滚比例。"""
         lo = getattr(self, "_chat_min", 0)
-        if lo >= 0:                      # 内容没超出可视区，滑块铺满（等于禁用）
+        total = getattr(self, "_chat_total", 0)
+        if lo >= 0 or total <= 0:        # 内容没超出可视区：滑块铺满
             try:
                 self.chat_sb.set(0.0, 1.0)
             except tk.TclError:
                 pass
             return
-        total_span = float(4 - lo)
-        f = (getattr(self, "_chat_offset", 0) - lo) / total_span
-        f = min(max(f, 0.0), 1.0)
+        h = max(self.chat_cv.winfo_height(), 40)
+        top = -getattr(self, "_chat_offset", lo)     # 已滚过的内容像素
+        f = max(0.0, min(1.0, top / float(total)))
+        l = max(f, min(1.0, (top + h) / float(total)))
         try:
-            self.chat_sb.set(f, 1.0)
+            self.chat_sb.set(f, l)
         except tk.TclError:
             pass
 
@@ -2885,19 +2896,25 @@ class NoteApp(object):
           TypeError 崩掉，表现为「滚动条上滚轮没反应」
         · ("moveto", f)：程序化定位"""
         lo = getattr(self, "_chat_min", 0)
-        if lo >= 0:
+        total = getattr(self, "_chat_total", 0)
+        if lo >= 0 or total <= 0:
             return
-        span = float(4 - lo)
-        if len(args) == 2:                      # (first, last)
-            self.render_messages(offset=lo + float(args[0]) * span)
-        elif args and args[0] == "moveto":
-            self.render_messages(offset=lo + float(args[1]) * span)
+        # 拖滑块语义（常规滚动条）：first = 滑块顶端占内容的比例，
+        # 换算回 offset = -first*total，钳在可滚范围 [lo, 4]
+        def _goto(f):
+            f = max(0.0, min(1.0, float(f)))
+            self.render_messages(offset=max(lo, min(4, -f * total)))
+        if args and args[0] == "moveto":        # 程序化定位（先判，防被两参分支截走）
+            _goto(args[1])
+        elif len(args) == 2:                    # 拖动滑块 (first, last)
+            _goto(args[0])
         elif args and args[0] == "scroll":
             try:
                 n = int(args[1])
             except (TypeError, ValueError):
                 return
-            unit = 14 if (len(args) < 3 or args[2] == "units") else 70
+            h = max(self.chat_cv.winfo_height(), 40)
+            unit = max(10, h // 10) if (len(args) < 3 or args[2] == "units") else h
             cur = getattr(self, "_chat_offset", 0)
             self.render_messages(offset=max(lo, min(4, cur - n * unit)))
 
