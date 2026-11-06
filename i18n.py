@@ -479,17 +479,19 @@ STRINGS = {
     "bubble_none": ("暂无任务", "No tasks"),
 
     # —— 日常任务（v1.9.9.27：每天/每周X 重复的任务）
-    "grp_daily": ("日常", "Daily"),
-    "grp_tmp": ("临时", "One-off"),
+    "grp_daily": ("日常任务", "Daily"),
+    "grp_tmp": ("临时任务", "One-off"),
     "grp_done": ("已完成", "Done"),
     # v1.9.9.32：两处计数统一口径（今天该做的日常里完成几件），
     # 文案把「谁除以谁」说破，不再出现裸的 1/3
     "daily_progress": ("今日完成 {d}/{n}", "{d}/{n} done today"),
     "daily_checked": ("打卡了：{t}", "Checked in: {t}"),
     "daily_unchecked": ("已取消今天的打卡：{t}", "Undid today's check-in: {t}"),
-    "daily_left": ("今日日常 {d}/{n} · 待办 {m}",
-                   "Daily {d}/{n} today · {m} to do"),
-    "counter_plain": ("待办 {left} · 已完成 {done}", "{left} to do · {done} done"),
+    # v1.9.9.41：两段统一「名称 已完成/总数」，措辞改为 日常任务/临时任务
+    "daily_left": ("日常任务 {d}/{n} · 临时任务 {td}/{tt}",
+                   "Daily {d}/{n} · One-off {td}/{tt}"),
+    "daily_only": ("日常任务 {d}/{n}", "Daily {d}/{n}"),
+    "counter_plain": ("临时任务 {td}/{tt}", "One-off {td}/{tt}"),
     "daily_tip": ("这是每天都要做的事", "This is a daily task"),
 }
 

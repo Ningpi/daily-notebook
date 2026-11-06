@@ -1566,7 +1566,8 @@ class TestV199927DailyList:
         self._tmp(a, "买牛奶")
         a.refresh_tasks()
         txt = a.counter.cget("text")
-        assert "/" not in txt or "待办" in txt, txt
+        # v1.9.9.41：统一格式「临时任务 已完成/总数」，不再出现裸计数
+        assert "临时任务" in txt and txt == "临时任务 0/1", txt
 
     # ---- 每周多天
     def test_weekly_multi_days_parsed(self):
@@ -1830,3 +1831,50 @@ class TestV199940:
                 pass
         assert "#2F8F83" in fills          # 日常青绿点
         assert a._cal_legend_daily.cget("fg").lower() == "#2f8f83"
+
+
+# =====================================================================
+# v1.9.9.41 三项：
+#   ① 底栏计数统一「日常任务 x/y · 临时任务 x/y」
+#   ② 对话消息不再被 60 条硬裁剪（旧记录永久消失的根因）
+#   ③ 滚动条滑块纯深色（gripcount=0，无白色抓握线）
+# =====================================================================
+class TestV199941:
+    def test_counter_unified_format(self, app):
+        a = app
+        a.store.tasks = [
+            {"id": "d1", "title": "背单词", "hhmm": "08:00", "repeat":
+                {"kind": "daily", "weekday": None, "monthday": None},
+             "day": a.store._today(), "due_date": None, "done": True,
+             "score": 20, "manual": False, "created": "09:00"},
+            {"id": "t1", "title": "买牛奶", "hhmm": None, "repeat": None,
+             "day": a.store._today(), "due_date": None, "done": False,
+             "score": 45, "manual": True, "created": "09:00"},
+            {"id": "t2", "title": "交房租", "hhmm": None, "repeat": None,
+             "day": a.store._today(), "due_date": None, "done": True,
+             "score": 45, "manual": True, "created": "09:00"},
+        ]
+        a.refresh_tasks()
+        txt = a.counter.cget("text")
+        assert txt == "日常任务 1/1 · 临时任务 1/2", txt
+
+    def test_messages_not_trimmed_at_60(self, app):
+        a = app
+        for i in range(80):
+            a.push("user", "消息%d" % i)
+        assert len(a.store.messages) == 80   # 旧版只剩 60
+        a.store.save()
+        a2 = M.NoteApp(tk.Toplevel(a.root))
+        try:
+            assert len(a2.store.messages) == 80   # 落盘/读盘后一条不少
+        finally:
+            a2.store.path = "/dev/null"       # 防止析构再写
+            a2.root.destroy()
+
+    def test_scrollbar_solid_thumb(self, app):
+        import tkinter.ttk as ttk
+        st = ttk.Style(app.root)
+        assert int(st.lookup("Vertical.TScrollbar", "gripcount")) == 0
+        thumb = st.lookup("Vertical.TScrollbar", "background")
+        assert thumb.lower() == st.lookup(
+            "Vertical.TScrollbar", "lightcolor").lower()

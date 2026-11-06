@@ -26,7 +26,13 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.40"
+VERSION = "1.9.9.41"
+
+# 对话消息最多保留条数。v1.9.9.40 及以前是 60——聊天一多旧记录
+# 被三处 [-60:] 硬裁剪**永久删除**（读盘/写盘/追加各一处），用户
+# 实测「对话数量过多，之前的记录会消失」。放宽到 2000 条：滚动条
+# 拖到顶就能翻回几个月前的对话，tasks.json 体积仍在百 KB 量级。
+MSG_KEEP = 2000
 
 
 # ----------------------------------------------------------------- 配色
@@ -192,7 +198,7 @@ class Store(object):
             with open(self.path, "r", encoding="utf-8") as f:
                 obj = json.load(f)
             self.tasks = obj.get("tasks", [])
-            self.messages = obj.get("messages", [])[-60:]
+            self.messages = obj.get("messages", [])[-MSG_KEEP:]
             self.topmost = bool(obj.get("topmost", True))
             self.theme = obj.get("theme", palette.DEFAULT_ID)
             self.lang = obj.get("lang", "zh")
@@ -302,7 +308,7 @@ class Store(object):
             "lang": self.lang,
             "quotes": self.quotes,
             "tasks": self.tasks,
-            "messages": self.messages[-60:],
+            "messages": self.messages[-MSG_KEEP:],
             "clock_geom": getattr(self, "clock_geom", None),
             "bell_mode": getattr(self, "bell_mode", "chime"),
             "notes": getattr(self, "notes", []),
@@ -1878,36 +1884,43 @@ class NoteApp(object):
         return C_BAR_LOW
 
     def _daily_counts(self):
-        """(今天该做的日常任务数, 其中已打卡数, 未做完的临时任务数)
+        """(今天该做的日常任务数, 其中已打卡数, 未做完的临时任务数,
+        临时已完成数, 临时总数)
 
         日常任务按「今天到期」算，不是全量——每周一三五的跑步，周二
-        不该出现在今天的分母里。"""
+        不该出现在今天的分母里。
+        v1.9.9.41：临时任务也带 x/y 完成度，与日常格式统一。"""
         dn = 0
         dtoday = 0
         tmp_left = 0
+        tmp_total = 0
         for t in self.store.tasks:
             if self._is_daily(t):
                 if self._daily_due_today(t):
                     dtoday += 1
                     if t.get("done"):
                         dn += 1
-            elif not t.get("done"):
-                tmp_left += 1
-        return dtoday, dn, tmp_left
+            else:
+                tmp_total += 1
+                if not t.get("done"):
+                    tmp_left += 1
+        return dtoday, dn, tmp_left, tmp_total - tmp_left, tmp_total
 
     def _counter_text(self, left, done):
-        """底栏计数（v1.9.9.27）：有日常任务时改成两段式
+        """底栏计数（v1.9.9.41 统一措辞与格式）
 
-        「日常 2/4 · 临时 3 件没做」——临时任务那栏不做分母，因为它
-        是无限累积的，算百分比没有意义；日常才有「今天做完没」的概念。
-        没有日常任务时保持原来的「待办 N · 已完成 M」。"""
+        「日常任务 2/4 · 临时任务 3/7」——两段都用 已完成/总数 格式；
+        只有日常没有临时 → 只显示日常段；只有临时 → 「临时任务 x/y ·
+        已完成 x」。原措辞「今日日常 / 待办」含义含混，一并更名。"""
         try:
-            n, dn, tmp_left = self._daily_counts()
+            n, dn, tmp_left, tmp_done, tmp_total = self._daily_counts()
         except Exception:
-            n = 0
+            n, dn, tmp_left, tmp_done, tmp_total = 0, 0, left, 0, left
+        if n and tmp_total:
+            return tr("daily_left", d=dn, n=n, td=tmp_done, tt=tmp_total)
         if n:
-            return tr("daily_left", d=dn, n=n, m=tmp_left)
-        return tr("counter_plain", left=left, done=done)
+            return tr("daily_only", d=dn, n=n)
+        return tr("counter_plain", td=tmp_done, tt=tmp_total)
 
     def draw_bar(self):
         cv = self.bar
@@ -2041,15 +2054,16 @@ class NoteApp(object):
 
     # ---------------- 换肤
     def _style_scrollbars(self):
-        """滚动条配色（v1.9.9.39 重做）：旧版底槽 = 背景色，轨道完全隐形，
+        """滚动条配色（v1.9.9.41 微调）：旧版底槽 = 背景色，轨道完全隐形，
         只剩一块浅色滑块悬在半空，看不出「这是滚动条」。
-        现在：底槽比背景深一档（轨道可见），滑块统一一种明显更深的颜色，
-        悬停/按下才变主题强调色——三档色阶一眼分层。"""
+        现在：底槽比背景深一档（轨道可见），滑块**纯深色**——clam 默认
+        会在滑块上画几道抓握白线（gripcount），设为 0 全部去掉，
+        颜色再加深一档，就是一根干净的深色条。悬停/按下变主题强调色。"""
         try:
             style = ttk.Style(self.root)
             if style.theme_use() != "clam":
                 style.theme_use("clam")     # clam 才允许逐项配色
-            thumb = _mix(C.LINE, C.TEXT, 0.32)      # 滑块：明显深于轨道
+            thumb = _mix(C.LINE, C.TEXT, 0.45)      # 滑块：纯深色
             trough = _mix(C.BG, C.SUB, 0.20)        # 底槽：比背景深一档
             style.configure("Vertical.TScrollbar",
                             background=thumb,
@@ -2057,7 +2071,8 @@ class NoteApp(object):
                             bordercolor=trough,
                             lightcolor=thumb,       # clam 的立体边也压平，
                             darkcolor=thumb,        # 整个滑块统一一种颜色
-                            arrowcolor=_mix(C.SUB, C.TEXT, 0.30),
+                            arrowcolor=thumb,
+                            gripcount=0,            # 去掉滑块上的白色抓握线
                             relief="flat")
             style.map("Vertical.TScrollbar",
                       background=[("active", C.ACCENT),
@@ -3019,7 +3034,7 @@ class NoteApp(object):
             # 双语回放：切语言时历史消息跟着换（zh, en)
             msg["zh"], msg["en"] = dual[0], dual[1]
         self.store.messages.append(msg)
-        self.store.messages = self.store.messages[-60:]
+        self.store.messages = self.store.messages[-MSG_KEEP:]
         self.store.save()
         self.render_messages()
 
@@ -5500,7 +5515,7 @@ class NoteApp(object):
             # 「底栏 0/2、组头 1/3」对不上的问题；今天不该做的
             # （如周二的每周一三五）不计入分母
             try:
-                _n, _dn, _tmp = self._daily_counts()
+                _n, _dn = self._daily_counts()[:2]
             except Exception:
                 _n, _dn = len(items or []), 0
             if _n:
@@ -7495,7 +7510,7 @@ class NoteApp(object):
                     break
         # 今天的日常若已全部打卡，圆点改成空心（○ = 还没打卡，● = 打完了）
         try:
-            _n, _dn, _tmp = self._daily_counts()
+            _n, _dn = self._daily_counts()[:2]
             if _n and _dn >= _n:
                 daily_all_done.add(today_s)
         except Exception:
