@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.36"
+VERSION = "1.9.9.37"
 
 
 # ----------------------------------------------------------------- 配色
@@ -1544,9 +1544,9 @@ class NoteApp(object):
         self.chat_cv.pack(side="top", fill="both")
         self.chat_cv.configure(yscrollcommand=self._chat_sb_sync)
         self.chat_cv.bind("<Configure>", lambda e: self.debounce("chat", self.render_messages))
-        self.chat_cv.bind("<MouseWheel>", self.on_chat_wheel)
-        self.chat_cv.bind("<Button-4>", lambda e: self.on_chat_wheel(e, -1))
-        self.chat_cv.bind("<Button-5>", lambda e: self.on_chat_wheel(e, 1))
+        # v1.9.9.37：滚轮统一走 bind_all 路由（_wheel_route）。
+        # 这里不再绑控件级滚轮——Windows 会把滚轮派给「持有焦点的输入框」
+        # 而不是指针下的控件，控件级绑定在那条路上根本收不到事件。
 
         # 输入行
         self.input_row = tk.Frame(r, bg=C.BG)
@@ -1621,9 +1621,7 @@ class NoteApp(object):
         self.list_cv.pack(side="top", fill="both", expand=True)
         self.list_cv.configure(yscrollcommand=self.list_sb.set)
         self.list_cv.bind("<Configure>", lambda e: self.debounce("list", self.refresh_tasks))
-        self.list_cv.bind("<MouseWheel>", self.on_list_wheel)
-        self.list_cv.bind("<Button-4>", lambda e: self.on_list_wheel(e, -1))
-        self.list_cv.bind("<Button-5>", lambda e: self.on_list_wheel(e, 1))
+        # v1.9.9.37：同聊天区，滚轮统一走全局路由
 
         # v1.9.9.36：滚轮全局路由——原来只绑在两块画布上，指针一放到
         # 滚动条/标题栏/底栏上滚轮就「没反应」。bind_all 统一收，
@@ -2879,11 +2877,29 @@ class NoteApp(object):
         except tk.TclError:
             pass
 
-    def _chat_scroll(self, first, last):
+    def _chat_scroll(self, *args):
+        """聊天区滚动条回调。三种调用形式都要接住（v1.9.9.37）：
+        · 拖动滑块 / yscrollcommand：("0.35", "0.52") 两参
+        · 点上下箭头 / 滚轮在滚动条上：("scroll", n, "units") 或
+          ("scroll", n, "pages")——旧代码只接两参，这类调用直接
+          TypeError 崩掉，表现为「滚动条上滚轮没反应」
+        · ("moveto", f)：程序化定位"""
         lo = getattr(self, "_chat_min", 0)
         if lo >= 0:
             return
-        self.render_messages(offset=lo + float(first) * (4 - lo))
+        span = float(4 - lo)
+        if len(args) == 2:                      # (first, last)
+            self.render_messages(offset=lo + float(args[0]) * span)
+        elif args and args[0] == "moveto":
+            self.render_messages(offset=lo + float(args[1]) * span)
+        elif args and args[0] == "scroll":
+            try:
+                n = int(args[1])
+            except (TypeError, ValueError):
+                return
+            unit = 14 if (len(args) < 3 or args[2] == "units") else 70
+            cur = getattr(self, "_chat_offset", 0)
+            self.render_messages(offset=max(lo, min(4, cur - n * unit)))
 
     # ---------------- 输入
     def placeholder_tick(self):
@@ -6129,42 +6145,39 @@ class NoteApp(object):
         self.list_cv.yview_scroll(direction, "units")
 
     def _wheel_route(self, e):
-        """v1.9.9.36：滚轮路由（bind_all）。规则：
-        · 两块画布自己已绑定 → 跳过（否则一次滚动走两个 handler）
-        · 输入框/文本/滑块 → 交给控件自己
-        · 滚动条上 → 转发给对应画布
-        · 其余区域 → 离谁近滚谁"""
+        """v1.9.9.37：滚轮全局路由（bind_all），纯指针位置派发。
+
+        关键教训（v1.9.9.36 修不好的根因）：Windows 上滚轮事件可能派给
+        「持有键盘焦点的控件」而不是指针下的控件——本程序启动就把焦点
+        锁在输入框，旧路由里「输入框 → 交给控件自己」一句，等于把
+        全窗口的滚轮都送进了输入框的横向滚动（肉眼无反应）。
+        所以这里不做任何控件跳过：事件不管落在谁头上，都按指针位置
+        滚对应的区域。"""
         num = getattr(e, "num", 0)
-        if num == 4:
-            d = -1
-        elif num == 5:
-            d = 1
-        else:
-            d = None
+        delta = getattr(e, "delta", 0)
+        up = (num == 4) or delta > 0
+        down = (num == 5) or delta < 0
+        if not (up or down):
+            return
         try:
-            w = self.root.winfo_containing(e.x_root, e.y_root)
+            top = e.widget.winfo_toplevel()
+            if top is not self.root:
+                return      # 日历/历史等子窗口有自己的滚轮绑定
         except Exception:
-            return
-        if w is None:
-            return
-        if w in (self.chat_cv, self.list_cv):
-            return                          # 画布自己的 handler 会触发
-        if isinstance(w, (tk.Entry, tk.Text, tk.Scale, tk.Spinbox, tk.Listbox)):
-            return                          # 这些控件滚轮有原生含义
-        if isinstance(w, (tk.Scrollbar, ttk.Scrollbar)):
-            if w is getattr(self, "chat_sb", None):
-                self.on_chat_wheel(e, d)
-            elif w is getattr(self, "list_sb", None):
-                self.on_list_wheel(e, d)
-            return
+            pass
         try:
             bottom = self.chat_cv.winfo_rooty() + self.chat_cv.winfo_height()
         except Exception:
-            bottom = e.y_root
+            return
+        # 注意两个 handler 的方向约定相反：
+        # · on_list_wheel：+1 = yview 向下滚
+        # · on_chat_wheel：+1 = offset 增大 = 看更旧的上一屏
+        # 所以「滚轮向上」对列表是 -1、对聊天是 +1。（旧代码 Button-4
+        # 直接传 -1 给聊天区，X11 下聊天滚轮方向一直是反的）
         if e.y_root < bottom:
-            self.on_chat_wheel(e, d)
+            self.on_chat_wheel(e, 1 if up else -1)
         else:
-            self.on_list_wheel(e, d)
+            self.on_list_wheel(e, -1 if up else 1)
 
     # ---------------- 历史窗口
     # ---------------- 时钟 / 正计时 / 倒计时（v1.3.8）
