@@ -240,7 +240,7 @@ def parse_tasks(text, fallback=True):
         if key in seen:
             continue
         seen.add(key)
-        title = title[:40]
+        # v1.9.9.45：标题不再硬截断（显示层负责省略）
         results.append((title, hhmm, score(title, seg, hhmm, passed, offset), seg, _dur(seg)))
     if not results and fallback:
         # Fallback: a plain sentence like "buy milk" still becomes a task

@@ -23,17 +23,21 @@ def backup_dir(base_dir):
     return os.path.join(base_dir, "backup")
 
 
-def auto_snapshot(base_dir, files, keep=KEEP_DAYS, today=None):
-    """把 files 拷进 backup/YYYY-MM-DD_/，并清掉超过 keep 天的旧快照。
+def auto_snapshot(base_dir, files, keep=KEEP_DAYS, today=None, force=False):
+    """把 files 拷进 backup/YYYY-MM-DD/，并清掉超过 keep 天的旧快照。
 
     files: 形如 [("tasks.json", 绝对路径), ...]；不存在的跳过。
-    返回快照目录名（没做事返回 None）。同一天只做一次。
+    返回快照目录名（没做事返回 None）。
+
+    v1.9.9.45：默认改为**每次保存前覆盖当天快照**（force=True）。
+    旧版「同一天只做一次」的结果是：备份停在当天开机那一刻，用户记了
+    一整天 23 条任务，备份里还是早上那 704 字节的空壳，等于没有备份。
     """
     day = (today or dt.date.today()).isoformat()
     root = backup_dir(base_dir)
     target = os.path.join(root, day)
-    if os.path.isdir(target):
-        return None                      # 今天已经快照过
+    if os.path.isdir(target) and not force:
+        return None                      # 今天已经快照过（兼容旧调用）
     try:
         os.makedirs(target, exist_ok=True)
         copied = False
@@ -73,13 +77,16 @@ def list_snapshots(base_dir):
 
 
 # ---------------------------------------------------------------- 导出
-def to_json(tasks, history, settings=None):
+def to_json(tasks, history, settings=None, messages=None):
+    """完整备份。v1.9.9.45：补上 messages——对话记录也是用户数据，
+    旧版导出里没有，换机恢复后聊天全空。"""
     obj = {
         "app": "每日记事本",
         "exported_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "tasks": tasks or [],
         "history": history or {},
         "settings": settings or {},
+        "messages": messages or [],
     }
     return json.dumps(obj, ensure_ascii=False, indent=2)
 
@@ -142,8 +149,25 @@ def _day_label(day, today):
 
 
 def _ics_escape(s):
+    """v1.9.9.45：补上 \\r（Outlook/系统日历对裸 CR 会解析失败）"""
     return (s or "").replace("\\", "\\\\").replace(",", "\\,") \
-                    .replace(";", "\\;").replace("\n", "\\n")
+                    .replace(";", "\\;").replace("\r\n", "\\n") \
+                    .replace("\r", "\\n").replace("\n", "\\n")
+
+
+def _fold(line, limit=75):
+    """ICS 规定单行不超过 75 字节，超出要用「空格+续行」折行。
+    中文标题很容易超；不折行时部分客户端会截断或整条丢弃。"""
+    out = []
+    cur = ""
+    for ch in line:
+        if len((cur + ch).encode("utf-8")) > limit:
+            out.append(cur)
+            cur = " " + ch
+        else:
+            cur += ch
+    out.append(cur)
+    return out
 
 
 def to_ics(tasks, history, stamp=None):
@@ -190,7 +214,10 @@ def to_ics(tasks, history, stamp=None):
                         else ""),
                     status, "END:VEVENT"]
     out.append("END:VCALENDAR")
-    return "\r\n".join(out) + "\r\n"
+    folded = []
+    for ln in out:
+        folded.extend(_fold(ln))
+    return "\r\n".join(folded) + "\r\n"
 
 
 def safe_name(s):

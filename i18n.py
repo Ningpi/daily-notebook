@@ -119,6 +119,30 @@ STRINGS = {
     # v1.9.9.43：不在今天到期的日常打卡提示
     "daily_not_today": ("【{t}】是{r}的任务，到那天再打卡吧，今天打卡不会计入完成度。",
                         "\"{t}\" is due {r}. Check it off on that day instead."),
+    # ---- v1.9.9.45 数据安全与失败可见
+    "ui_error": ("操作出错了，已记入 log.txt。", "Something went wrong. Logged."),
+    "save_failed_short": ("保存失败！内容可能丢失", "Save failed!"),
+    "save_failed_runtime": ("⚠ 保存失败：{e}\n现在记的内容可能不会保存。请检查磁盘空间，"
+                            "或把 data 目录复制一份备份。",
+                            "⚠ Save failed: {e}\nRecent changes may be lost."),
+    "quit_save_failed": ("保存失败：{e}\n\n现在退出，最后一次改动可能丢失。仍要退出吗？",
+                         "Save failed: {e}\n\nQuit anyway?"),
+    "load_corrupt_notice": ("⚠ 数据文件读取失败（{e}）。\n原文件已另存为：\n{p}\n"
+                            "本次从空列表开始；如需找回，可把副本改名回 tasks.json 后重启。",
+                            "⚠ Could not read data ({e}).\nA copy was kept at:\n{p}"),
+    "hist_corrupt_notice": ("⚠ 历史记录读取失败，原文件已另存副本：\n{p}\n"
+                            "本次不会覆盖它。", "⚠ History unreadable. Copy kept at:\n{p}"),
+    "note_deleted_undo": ("便签已删除，说「撤回」可以恢复。", "Note deleted. Say \"undo\"."),
+    "note_del_ask": ("删除这条便签？", "Delete this note?"),
+    "import_json": ("从备份恢复…", "Restore from backup…"),
+    "import_title": ("选择备份文件", "Choose a backup"),
+    "all_files": ("所有文件", "All files"),
+    "import_confirm": ("将用这份备份替换当前数据（共 {n} 条任务）。\n"
+                       "当前数据会先另存一份，继续吗？",
+                       "Replace current data with this backup ({n} tasks)?\n"
+                       "Current data will be saved aside first."),
+    "import_ok": ("已从备份恢复 {n} 条任务。\n来源：{p}", "Restored {n} tasks from {p}"),
+    "import_fail": ("恢复失败：{e}", "Restore failed: {e}"),
     # v1.9.9.40：日历圆点图例
     "cal_legend_daily": ("日常", "Daily"),
     "cal_legend_temp": ("待办", "One-off"),

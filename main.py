@@ -11,6 +11,7 @@ import socket
 import random
 import threading
 import subprocess
+import shutil
 import datetime as dt
 import tkinter as tk
 import tkinter.ttk as ttk
@@ -26,7 +27,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.44"
+VERSION = "1.9.9.45"
 
 # 对话消息最多保留条数。v1.9.9.40 及以前是 60——聊天一多旧记录
 # 被三处 [-60:] 硬裁剪**永久删除**（读盘/写盘/追加各一处），用户
@@ -167,7 +168,8 @@ class Store(object):
         self.theme = palette.DEFAULT_ID
         self.lang = "zh"
         self.clock_geom = None
-        self.alpha = 0.88          # 便签透明度（底栏滑块可调，0.40~1.00）
+        # v1.9.9.45：默认 0.88 太透，桌面图标压在字上影响阅读；新装默认 0.95（已有用户保存过的值不受影响）
+        self.alpha = 0.95          # 便签透明度（底栏滑块可调，0.40~1.00）
         self.bell_mode = "chime"
         self.user_name = ""        # 用户昵称（首次启动问出来）
         self.bot_name = ""         # 助手自己的名字
@@ -183,6 +185,11 @@ class Store(object):
         self.chat_h = None
         self.quotes = {"zh": {"last": "", "recent": []},
                        "en": {"last": "", "recent": []}}   # 中英各一套
+        # v1.9.9.45：读盘失败标记（界面据此提示 + 保护原文件）
+        self.load_failed = False
+        self.load_error = ""
+        self.corrupt_copy = None
+        self.hist_failed = False
         self.load()
         self.load_history()
         self.sync_history()
@@ -192,69 +199,148 @@ class Store(object):
         return dt.date.today().isoformat()
 
     def load(self):
+        """读任务文件。
+
+        v1.9.9.45：旧版把整个读取塞进一个 try 里 `except: pass`——
+        文件坏一格（断电、手改错一个逗号）就静默变成空数据，随后
+        第一次保存把**原件覆盖**，任务和昵称一起永久消失（用户实测
+        丢过 7 条任务）。现在：
+          1. 编码兼容 UTF-8（含 BOM）/ GBK，记事本另存为哪种都能读；
+          2. 真读不懂 → 把原文件另存一份 `.corrupt-时间戳`，再继续；
+          3. 每个字段独立兜底，一个值坏不再连累后面的设置（B5）。
+        """
         if not os.path.exists(self.path):
             return
+        text = None
         try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                obj = json.load(f)
-            self.tasks = obj.get("tasks", [])
-            self.messages = obj.get("messages", [])[-MSG_KEEP:]
-            self.topmost = bool(obj.get("topmost", True))
-            self.theme = obj.get("theme", palette.DEFAULT_ID)
-            self.lang = obj.get("lang", "zh")
-            self.quotes = obj.get("quotes") or {
-                "zh": {"last": obj.get("quote_last", ""),
-                       "recent": obj.get("quote_recent", [])[-60:]},
-                "en": {"last": "", "recent": []},
-            }
-            self.clock_geom = obj.get("clock_geom")
-            self.bell_mode = obj.get("bell_mode", "chime")
-            self.notes = obj.get("notes", [])
-            self.note_pos = obj.get("note_pos")
-            self.note_geom = obj.get("note_geom")
-            self.chat_h = obj.get("chat_h")
-            self.alpha = float(obj.get("alpha", 0.88))
-            self.user_name = (obj.get("user_name") or "").strip()
-            self.bot_name = (obj.get("bot_name") or "").strip()
-            self.setup_stage = int(obj.get("setup_stage", 0))
-            self.bubble_enabled = bool(obj.get("bubble_enabled", True))
-            self.bubble_w = max(60, min(160, int(obj.get("bubble_w", 84) or 84)))
-            self.font_scale = max(0.8, min(1.3, float(obj.get("font_scale", 1.0) or 1.0)))
-            td = obj.get("text_darken")
-            if td is not None:
-                # 存的是 0~1.0 的浮点；旧版本可能存 0~45 的百分数
-                td = float(td)
-                if td > 1.0:
-                    td = td / 100.0
-                self.text_darken = max(0.0, min(1.0, td))
-            # v1.8.1 起不再问助手名：停留在旧阶段 2 的直接视为完成
-            if self.setup_stage >= 2:
-                self.setup_stage = 3
-            # v1.9.9.21：「回车发送」提示只需教一次，之后启动不再出现
-            self.enter_hint_done = bool(obj.get("enter_hint_done", False))
-            # v1.9.9.34：托盘后台气泡状态
-            self.tray_notify_shown = bool(obj.get("tray_notify_shown", False))
-            self.tray_notify_off = bool(obj.get("tray_notify_off", False))
-            for k in ("zh", "en"):
-                self.quotes.setdefault(k, {"last": "", "recent": []})
-            saved_day = obj.get("date", self._today())
-            if saved_day != self.today:
-                # 跨天（关着软件过了零点）：与运行时 tick 保持同一套规则，
-                # 不要把「昨天没做完的事」一律改写成今天 —— 那会让历史失真。
-                #
-                # v1.9.9 修复：之前先改 self.today 再归档，导致昨天的任务被
-                # 记到今天名下（历史里「昨天」永远是空的）。现在先把任务按
-                # 原始日期 saved_day 归档，再切到今天。
-                today = self._today()
+            with open(self.path, "rb") as f:
+                raw = f.read()
+            for enc in ("utf-8-sig", "utf-8", "gbk", "gb18030"):
                 try:
-                    self.sync_history(day=saved_day)
-                except Exception:
-                    pass
-                self._roll_day(today)
-                self.today = today
-                self.messages = []
+                    text = raw.decode(enc)
+                    break
+                except (UnicodeDecodeError, LookupError):
+                    continue
+        except Exception as exc:
+            self._mark_corrupt("读取失败：%s" % exc)
+            return
+        if text is None:
+            self._mark_corrupt("编码无法识别（不是 UTF-8 也不是 GBK）")
+            return
+        try:
+            obj = json.loads(text.lstrip("\ufeff"))
+            if not isinstance(obj, dict):
+                raise ValueError("顶层不是对象")
+        except Exception as exc:
+            self._mark_corrupt("JSON 解析失败：%s" % exc)
+            return
+        self._apply_obj(obj)
+
+    def _mark_corrupt(self, reason):
+        """数据文件读不了：**先把原文件留一份**，绝不无声覆盖。
+
+        保留的不是「加载失败状态」而是原件本身——用户还能拿去人工抢救，
+        也方便我们复盘。副本名字带时间戳，多次损坏不会互相覆盖。"""
+        ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        keep = self.path + ".corrupt-" + ts
+        try:
+            shutil.copy2(self.path, keep)
+            self.corrupt_copy = keep
+        except Exception:
+            self.corrupt_copy = None
+        self.load_failed = True
+        self.load_error = reason
+        try:
+            with open(os.path.join(data_dir(), "load_error.log"), "a",
+                      encoding="utf-8") as lf:
+                lf.write("%s  %s  %s\n" % (
+                    dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    self.path, reason))
         except Exception:
             pass
+
+    def _apply_obj(self, obj):
+        """把读出来的字典灌进 Store；每个字段独立 try（B5）。
+
+        旧版一个 float() 抛错，后面昵称/主题/字体全被跳过，等于「一处坏
+        字段把所有设置恢复默认」。"""
+        def _safe(fn, default=None):
+            try:
+                return fn()
+            except Exception:
+                return default
+
+        self.tasks = _safe(lambda: [t for t in obj.get("tasks", [])
+                                    if isinstance(t, dict)], []) or []
+        # 坏时间清洗（B4）：hhmm 不是 HH:MM 就清空，否则提醒循环会整轮抛异常
+        for _t in self.tasks:
+            _h = _t.get("hhmm")
+            if _h is not None:
+                try:
+                    _hh, _mm = str(_h).split(":")
+                    if not (0 <= int(_hh) <= 23 and 0 <= int(_mm) <= 59):
+                        raise ValueError
+                except Exception:
+                    _t["hhmm"] = None
+                    _t["deadline_txt"] = None
+        self.messages = _safe(lambda: obj.get("messages", [])[-MSG_KEEP:], []) or []
+        self.topmost = _safe(lambda: bool(obj.get("topmost", True)), True)
+        self.theme = _safe(lambda: obj.get("theme", palette.DEFAULT_ID),
+                           palette.DEFAULT_ID)
+        self.lang = _safe(lambda: obj.get("lang", "zh"), "zh")
+        self.quotes = _safe(lambda: obj.get("quotes"), None) or {
+            "zh": {"last": obj.get("quote_last", ""),
+                   "recent": (obj.get("quote_recent") or [])[-60:]},
+            "en": {"last": "", "recent": []},
+        }
+        self.clock_geom = _safe(lambda: obj.get("clock_geom"))
+        self.bell_mode = _safe(lambda: obj.get("bell_mode", "chime"), "chime")
+        self.notes = _safe(lambda: [n for n in obj.get("notes", [])
+                                    if isinstance(n, dict)], []) or []
+        self.note_pos = _safe(lambda: obj.get("note_pos"))
+        self.note_geom = _safe(lambda: obj.get("note_geom"))
+        self.chat_h = _safe(lambda: obj.get("chat_h"))
+        self.alpha = _safe(lambda: float(obj.get("alpha", 0.95)), 0.95)
+        self.user_name = _safe(lambda: (obj.get("user_name") or "").strip(), "")
+        self.bot_name = _safe(lambda: (obj.get("bot_name") or "").strip(), "")
+        self.setup_stage = _safe(lambda: int(obj.get("setup_stage", 0)), 0)
+        self.bubble_enabled = _safe(lambda: bool(obj.get("bubble_enabled", True)), True)
+        self.bubble_w = _safe(lambda: max(60, min(160, int(obj.get("bubble_w", 84) or 84))), 84)
+        self.font_scale = _safe(lambda: max(0.8, min(1.3, float(obj.get("font_scale", 1.0) or 1.0))), 1.0)
+
+        def _darken():
+            td = obj.get("text_darken")
+            if td is None:
+                return None
+            td = float(td)
+            if td > 1.0:                  # 旧版本存 0~45 的百分数
+                td = td / 100.0
+            return max(0.0, min(1.0, td))
+        self.text_darken = _safe(_darken, None)
+        # v1.8.1 起不再问助手名：停留在旧阶段 2 的直接视为完成
+        if self.setup_stage >= 2:
+            self.setup_stage = 3
+        self.enter_hint_done = _safe(lambda: bool(obj.get("enter_hint_done", False)), False)
+        self.tray_notify_shown = _safe(lambda: bool(obj.get("tray_notify_shown", False)), False)
+        self.tray_notify_off = _safe(lambda: bool(obj.get("tray_notify_off", False)), False)
+        for k in ("zh", "en"):
+            self.quotes.setdefault(k, {"last": "", "recent": []})
+        saved_day = _safe(lambda: obj.get("date", self._today()), self._today())
+        if saved_day != self.today:
+            # 跨天（关着软件过了零点）：与运行时 tick 保持同一套规则，
+            # 不要把「昨天没做完的事」一律改写成今天 —— 那会让历史失真。
+            #
+            # v1.9.9 修复：之前先改 self.today 再归档，导致昨天的任务被
+            # 记到今天名下（历史里「昨天」永远是空的）。现在先把任务按
+            # 原始日期 saved_day 归档，再切到今天。
+            today = self._today()
+            try:
+                self.sync_history(day=saved_day)
+            except Exception:
+                pass
+            self._roll_day(today)
+            self.today = today
+            self.messages = []
 
     def _roll_day(self, today):
         """跨天重置（v1.9.9.27：抽成一处，启动和运行时 tick 共用一套规则）
@@ -328,43 +414,95 @@ class Store(object):
             "tray_notify_shown": bool(getattr(self, "tray_notify_shown", False)),
             "tray_notify_off": bool(getattr(self, "tray_notify_off", False)),
         }
-        self._atomic(self.path, obj)
-        # v1.9.9.20：每天首次保存做一次快照，保留最近 7 天
-        # （同一天只会成功一次，后续调用直接返回，开销可忽略）
+        # v1.9.9.45：**写盘前**先覆盖当天快照——备份的价值在于「覆盖发生前
+        # 的那一刻」。旧版是写完之后每天只快照一次，结果当天记了 23 条任务、
+        # 备份里还是开机时的空壳（实测 704 字节）。
         try:
-            if not getattr(Store, "_snap_done", None) == self.today:
-                import exporter as _exp
-                if _exp.auto_snapshot(data_dir(),
-                                      [("tasks.json", self.path),
-                                       ("history.json", self.hist_path)]):
-                    Store._snap_done = self.today
+            import exporter as _exp
+            _exp.auto_snapshot(data_dir(),
+                               [("tasks.json", self.path),
+                                ("history.json", self.hist_path)],
+                               force=True)
+        except Exception:
+            pass
+        self._atomic(self.path, obj)
+        # 首次保存时上面没有源文件可拷，写完后补一次（保证备份从第一天就有）
+        try:
+            import exporter as _exp2
+            _exp2.auto_snapshot(data_dir(),
+                                [("tasks.json", self.path),
+                                 ("history.json", self.hist_path)],
+                                force=True)
         except Exception:
             pass
 
     # ---------------- 历史归档
     def load_history(self):
+        """读历史文件（v1.9.9.45：损坏时保护原件，绝不静默清空）
+
+        旧版读失败就当空历史，而 __init__ 紧接着调 sync_history()——
+        于是启动瞬间就把损坏文件重写成「只剩今天」，过去所有天消失。
+        现在读失败会：① 留一份 `.corrupt-时间戳` 副本；② 置 hist_failed，
+        sync_history 在本次会话内拒绝写盘。"""
         if not os.path.exists(self.hist_path):
             return
+        text = None
         try:
-            with open(self.hist_path, "r", encoding="utf-8") as f:
-                obj = json.load(f)
-            days = obj.get("days", {})
-            if isinstance(days, dict):
-                self.history = {k: v for k, v in days.items() if isinstance(v, list)}
+            with open(self.hist_path, "rb") as f:
+                raw = f.read()
+            for enc in ("utf-8-sig", "utf-8", "gbk", "gb18030"):
+                try:
+                    text = raw.decode(enc)
+                    break
+                except (UnicodeDecodeError, LookupError):
+                    continue
         except Exception:
-            pass
+            text = None
+        obj = None
+        if text is not None:
+            try:
+                obj = json.loads(text.lstrip("\ufeff"))
+            except Exception:
+                obj = None
+        if not isinstance(obj, dict):
+            ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            keep = self.hist_path + ".corrupt-" + ts
+            try:
+                shutil.copy2(self.hist_path, keep)
+                self.hist_corrupt_copy = keep
+            except Exception:
+                self.hist_corrupt_copy = None
+            self.hist_failed = True
+            try:
+                with open(os.path.join(data_dir(), "load_error.log"), "a",
+                          encoding="utf-8") as lf:
+                    lf.write("%s  %s  历史文件解析失败，已保留副本 %s\n" % (
+                        dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        self.hist_path, self.hist_corrupt_copy or "(复制失败)"))
+            except Exception:
+                pass
+            return
+        days = obj.get("days", {})
+        if isinstance(days, dict):
+            self.history = {k: v for k, v in days.items() if isinstance(v, list)}
+        # 记下当前签名：内容没变就不该在启动时写盘
+        self._hist_last_sig = self._hist_sig(self.history.get(self.today, []))
 
     def save_history(self):
+        if getattr(self, "hist_failed", False):
+            return          # 原件已另存副本；本次会话不覆盖损坏的历史文件
         self._atomic(self.hist_path, {"days": self.history})
 
-    def purge_history(self, titles, only_today=False):
-        """从历史里移除指定标题的条目（v1.9.8：手动删除的任务不再留在
-        历史记录里，数据同步）。
+    def purge_history(self, titles=None, only_today=False, tids=None):
+        """从历史里移除指定条目的记录。
 
-        P1 问题7（v1.9.9.22）：新增 only_today——撤回今天的录入只清
-        今天的历史，昨天及更早归档的记录是当时已成立的，不动；
-        手动删除仍清所有天。"""
-        if not titles:
+        注意 only_today 的语义（v1.9.9.45 起删除/改名默认**只动今天**）：
+        用户删掉「今天这条买牛奶」，昨天的买牛奶是他真实完成过的记录，
+        不该被一起抹掉——旧版遍历所有天按标题清，历史会一片片消失，
+        而且撤回也补不回来。"""
+        titles = titles or set()
+        tids = tids or set()
+        if not titles and not tids:
             return
         try:
             days = [dt.date.today().isoformat()] if only_today \
@@ -372,11 +510,15 @@ class Store(object):
             changed = False
             for day in days:
                 rows = self.history.get(day) or []
-                kept = [r for r in rows if r.get("title", "") not in titles]
+                def _keep(r):
+                    if r.get("tid"):
+                        return r["tid"] not in tids
+                    return r.get("title", "") not in titles
+                kept = [r for r in rows if _keep(r)]
                 if len(kept) != len(rows):
                     self.history[day] = kept
                     changed = True
-            if changed:
+            if changed and not getattr(self, "hist_failed", False):
                 self.save_history()
         except Exception:
             pass
@@ -408,24 +550,42 @@ class Store(object):
                       bool(r.get("done")), r.get("done_at", "")) for r in rows)
 
     def sync_history(self, day=None):
-        """把当日任务快照写进历史（按标题合并；内容没变就不写盘）
+        """把当日任务快照写进历史。
 
-        day 可显式指定归档到哪一天（跨天启动时用于把昨天的任务归到昨天）。
+        v1.9.9.45：行绑定任务 id（tid）。旧版只按标题合并——同一天两条
+        「跑步」会被并成一条，删掉其中一条还会把另一条的历史也带走。
+        没有 tid 的旧数据继续按标题匹配，读旧文件不会突然多出一堆重复行。
         """
+        if getattr(self, "hist_failed", False):
+            return          # 历史文件损坏：本次会话不写，先把原件留给人抢救
         day = day or self.today
         snap = self.history.get(day, [])
         by_title = {}
+        by_tid = {}
         for r in snap:
-            by_title[r.get("title", "")] = r
+            if r.get("tid"):
+                by_tid.setdefault(r["tid"], r)
+            by_title.setdefault(r.get("title", ""), r)
         changed = False
         for t in self.tasks:
             title = t.get("title", "")
             if not title:
                 continue
-            old = by_title.get(title)
+            tid = t.get("id")
+            old = by_tid.get(tid) if tid else None
+            if old is None:
+                cand = by_title.get(title)
+                # 旧行没有 tid 时才按标题接管（并补上 tid）
+                if cand is not None and not cand.get("tid"):
+                    old = cand
+                    old["tid"] = tid
+                    if tid:
+                        by_tid[tid] = old
+                    changed = True
             if old is None:
                 old = {
                     "title": title,
+                    "tid": tid,
                     "hhmm": t.get("hhmm"),
                     "score": t.get("score", 30),
                     "done": bool(t.get("done")),
@@ -433,6 +593,8 @@ class Store(object):
                 }
                 snap.append(old)
                 by_title[title] = old
+                if tid:
+                    by_tid[tid] = old
                 changed = True
             else:
                 old["score"] = max(old.get("score", 0), t.get("score", 0))
@@ -1121,6 +1283,14 @@ class NoteApp(object):
     def __init__(self, root):
         self.root = root
         self.store = Store()
+        # v1.9.9.45：界面回调异常统一进日志（打包后 stdout 不可见，
+        # 否则「点了没反应」永远查不到线索）
+        try:
+            root.report_callback_exception = self._report_callback_exception
+        except Exception:
+            pass
+        self._last_save_err = None     # 上一次提示过的保存错误
+        self._save_warned = False
         self.overlay = False
         self._drag = None
         self._resizing = None
@@ -1213,6 +1383,15 @@ class NoteApp(object):
     def _first_hello(self):
         """开场白：首次启动只问称呼；之后每天一句轮换问候（不重复、循环）"""
         try:
+            # v1.9.9.45：数据读不出来要**当面说**，并给出保留的副本路径。
+            # 旧版静默变成空列表，用户以为「软件把我的东西吃了」。
+            if getattr(self.store, "load_failed", False):
+                self.push("bot", tr("load_corrupt_notice",
+                                    e=self.store.load_error or "?",
+                                    p=self.store.corrupt_copy or "?"))
+            if getattr(self.store, "hist_failed", False):
+                self.push("bot", tr("hist_corrupt_notice",
+                                    p=getattr(self.store, "hist_corrupt_copy", "?") or "?"))
             # 数据目录不可写时明确告知（否则重启后任务全丢，用户毫无头绪）
             if getattr(Store, "_save_error", None):
                 self.push_tr("bot", "save_warn")
@@ -1342,6 +1521,41 @@ class NoteApp(object):
             return
         ch = getattr(e, "char", "") or ""
         ks = getattr(e, "keysym", "") or ""
+        # v1.9.9.45：行内改名/改便签时，哪怕焦点没落到编辑框，按键也
+        # 必须进编辑框，不能进发送框（旧版在这里把字母塞进发送框，
+        # 回车还会凭空新建一条脏任务——QA 实测「Milkbread」就是这么来的）
+        ed = getattr(self, "_edit_entry", None)
+        if ed is not None:
+            try:
+                alive = bool(ed.winfo_exists())
+            except Exception:
+                alive = False
+            if alive and w is not ed:
+                try:
+                    ed.focus_force()
+                    if ks == "BackSpace":
+                        n = len(ed.get())
+                        i = ed.index("insert")
+                        if i > 0:
+                            ed.delete(i - 1)
+                    elif ks == "Delete":
+                        i = ed.index("insert")
+                        if i < len(ed.get()):
+                            ed.delete(i)
+                    elif ks in ("Return", "KP_Enter"):
+                        ed.event_generate("<Return>")
+                    elif ks == "Left":
+                        ed.icursor(max(0, ed.index("insert") - 1))
+                    elif ks == "Right":
+                        ed.icursor(min(len(ed.get()), ed.index("insert") + 1))
+                    elif ch and ch.isprintable():
+                        ed.insert("insert", ch)
+                    else:
+                        return
+                    self.diag("按键回补到行内编辑框 %s" % ks)
+                except Exception:
+                    pass
+                return "break"
         if self._compose_placeholder and (ch.isprintable() and ch.strip()):
             self.clear_placeholder()
         try:
@@ -1379,7 +1593,7 @@ class NoteApp(object):
         r.title(self.app_name() + "  v" + VERSION)
         r.configure(bg=C.BG)
         r.overrideredirect(True)          # 无边框，像便签
-        r.attributes("-alpha", getattr(self.store, "alpha", 0.88))  # 半透明：可调
+        r.attributes("-alpha", getattr(self.store, "alpha", 0.95))  # 半透明：可调
         # 文字加深：手动滑块优先；没动过就按透明度推导
         C.set_darken(self._effective_darken())
         sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
@@ -1723,6 +1937,23 @@ class NoteApp(object):
                     lbl.config(text=want)
             except Exception:
                 pass
+        # v1.9.9.45：短标签仍放不下（英文 + 大字体 + 窄窗口）→ 收紧内边距。
+        # 旧版到此为止，最右侧「Clock」会被窗口边缘裁成「Cloc」
+        try:
+            self.foot.update_idletasks()
+            need = 8
+            for lbl, _k, _s in pairs:
+                need += lbl.winfo_reqwidth() + 8
+            if need > w:
+                for lbl, _k, _s in pairs:
+                    lbl.config(padx=1)
+                    try:
+                        lbl.pack_configure(padx=0)
+                    except Exception:
+                        pass
+                self.cal_btn.pack_configure(padx=(0, 2))
+        except Exception:
+            pass
 
     def draw_head(self):
         cv = self.head
@@ -2037,6 +2268,42 @@ class NoteApp(object):
     # 此前每次 diag 都重新 open 文件——Windows 上杀毒软件扫描时会锁住文件，
     # open() 永久阻塞 → UI 线程卡死 →「未响应」。log 证实卡死都发生在
     # 回调第一行 diag 处，就是它。现在 UI 线程只往队列里放，磁盘完全交给后台线程。
+    def _check_save_error(self):
+        """v1.9.9.45：保存失败要**当场说**，不能等下次重启才发现。
+
+        旧版 `_save_error` 只在启动问候时读一次，运行期间失败完全无声；
+        用户以为记上了，重启才知道丢了。"""
+        err = Store._save_error
+        if not err:
+            self._save_warned = False
+            return
+        if err == getattr(self, "_last_save_err", None) and \
+                getattr(self, "_save_warned", False):
+            return
+        self._last_save_err = err
+        self._save_warned = True
+        try:
+            self.push("bot", tr("save_failed_runtime", e=err))
+            self.flash(tr("save_failed_short"))
+        except Exception:
+            pass
+
+    def _report_callback_exception(self, exc, val, tb):
+        """v1.9.9.45：统一接管界面回调异常。
+
+        打包成 windowed 程序后 stdout 不可见，回调里抛异常等于「点了没
+        反应」，用户描述不清、维护者也没有线索。现在一律写日志 + 提示。"""
+        try:
+            import traceback
+            detail = "".join(traceback.format_exception(exc, val, tb))
+            self.diag("[EXC] " + detail.replace("\n", " | ")[:900])
+        except Exception:
+            detail = "%s: %s" % (exc, val)
+        try:
+            self.flash(tr("ui_error"))
+        except Exception:
+            pass
+
     def diag(self, msg):
         try:
             if getattr(self, "_diag_q", None) is None:
@@ -2062,6 +2329,22 @@ class NoteApp(object):
             for attempt in range(3):
                 try:
                     if fh is None:
+                        # v1.9.9.45：日志轮转——长期使用不会无限变大
+                        try:
+                            if os.path.getsize(self._diag_path) > 1024 * 1024:
+                                for _i in (2, 1):
+                                    _a = self._diag_path + (".%d" % _i)
+                                    _b = self._diag_path + (".%d" % (_i + 1))
+                                    if os.path.exists(_a):
+                                        if os.path.exists(_b):
+                                            os.remove(_b)
+                                        os.rename(_a, _b)
+                                _b1 = self._diag_path + ".1"
+                                if os.path.exists(_b1):
+                                    os.remove(_b1)
+                                os.rename(self._diag_path, _b1)
+                        except Exception:
+                            pass
                         fh = open(self._diag_path, "a", encoding="utf-8")
                     fh.write(line + "\n")
                     fh.flush()
@@ -2581,7 +2864,7 @@ class NoteApp(object):
             self.chat_wrap.pack_forget()
             self.input_row.pack_forget()
         else:
-            r.attributes("-alpha", getattr(self.store, "alpha", 0.88))  # 半透明：可调
+            r.attributes("-alpha", getattr(self.store, "alpha", 0.95))  # 半透明：可调
             self.chat_wrap.pack(side="top", fill="x", after=self.bar)
             self.input_row.pack(side="top", fill="x", padx=6, pady=(2, 4),
                                 after=self.chat_wrap)
@@ -2657,6 +2940,20 @@ class NoteApp(object):
         self.store.sync_history()
         self._save_note_pos()
         self.store.save()
+        # v1.9.9.45：保存失败就别装作没事——旧版这里 save() 之后不管
+        # 结果直接 os._exit(0)，磁盘满/文件被占用时最后一次改动静默丢失。
+        if Store._save_error:
+            try:
+                from tkinter import messagebox
+                self.root.deiconify()
+                ok = messagebox.askyesno(
+                    self.app_name(), tr("quit_save_failed", e=Store._save_error))
+                if not ok:
+                    self._closing = False
+                    self.root.lift()
+                    return
+            except Exception:
+                pass
         self.close_history()
         try:
             self.root.update_idletasks()
@@ -3036,12 +3333,29 @@ class NoteApp(object):
         text = self.entry.get().strip()
         if not text:
             return "break"
-        self.entry.delete(0, "end")
+        # v1.9.9.45：先处理、成功再清空。旧版一进来就 delete，解析链路
+        # 抛异常时用户刚打的话从输入框消失（内容还在聊天记录里，但观感
+        # 就是「白打了」）。失败时把原文回填，并记日志。
         self._retire_enter_hint()      # 第一次成功发送后撤掉「回车发送」
         if self.list_mode == "note":
-            self.add_note(text)
+            try:
+                self.add_note(text)
+            except Exception as exc:
+                self.diag("[EXC] add_note %r" % (exc,))
+                return "break"
+            self.entry.delete(0, "end")
             return "break"
-        self.handle_user_text(text)
+        try:
+            self.handle_user_text(text)
+        except Exception as exc:
+            self.diag("[EXC] handle_user_text %r" % (exc,))
+            self.entry.delete(0, "end")
+            self.entry.insert(0, text)
+            self.entry.config(fg=C.TEXT)
+            self._compose_placeholder = False
+            self.flash(tr("ui_error"))
+            return "break"
+        self.entry.delete(0, "end")
         return "break"
 
     def _retire_enter_hint(self):
@@ -3486,6 +3800,18 @@ class NoteApp(object):
         need_pri = pt.get("need_pri")
         need_dl = pt.get("need_dl")
         m = self._pri_re().search(text)
+        # v1.9.9.45：字母必须「整句就是选项」才算回答。
+        # 旧版在整段文字里 search，于是「处理<b>&特殊符号」里的 b 被当成
+        # 「B.重要」，只回一句「优先级：重要」，**整条新任务静默消失**
+        # （QA 实测任务数 24→24）。现在：匹配到的字母之外还有正文 → 按新任务处理。
+        if m and m.group(0).isascii() and m.group(0).isalpha():
+            _rest = (text or "").replace(m.group(0), "", 1)
+            _rest = re.sub(r"[\s，,。.．、:：;；!！?？]+", "", _rest)
+            _has_time = bool(self._dl_time_re().search(text)) or bool(
+                re.search(r"[\u4e00-\u9fff]", text or "") and
+                (core.find_times(text or "") or []))
+            if _rest and not _has_time:
+                return False, None, text          # 交给新任务解析，不吞
         time_m = self._dl_time_re().search(text)
         no_dl = bool(self._dl_no_re().search(text))
         # v1.9.4：优先用 parser 引擎解析回答（支持中文数字「八点」「八点半」
@@ -4330,7 +4656,8 @@ class NoteApp(object):
             if not rec:
                 return None
             # v1.9.9.22：栈顶是 UI 操作（勾选/优先级/删除/改名）→ 撤回该操作
-            if rec.get("kind") in ("done", "priority", "delete", "rename"):
+            if rec.get("kind") in ("done", "priority", "delete", "rename",
+                                   "note_del"):
                 return rec["kind"]
             if rec.get("kind") == "remind_at" and not explicit_time:
                 return "remind_at"      # v1.9.9.9：撤回刚才设的提醒时刻
@@ -4393,7 +4720,8 @@ class NoteApp(object):
                     task = t
                     break
         # v1.9.9.22：UI 操作类撤回（勾选 / 优先级 / 删除 / 改名）
-        if kind in ("done", "priority", "delete", "rename"):
+        # v1.9.9.45：加 note_del（便签删除可撤回）
+        if kind in ("done", "priority", "delete", "rename", "note_del"):
             return self._undo_ui_op(kind, rec)
         if kind == "task":
             if task is None:
@@ -4404,7 +4732,10 @@ class NoteApp(object):
             # 记录，撤回今天的录入不应该把昨天的也抹掉（同名任务跨天）
             _t = task.get("title", "")
             if _t:
-                self.store.purge_history({_t}, only_today=True)
+                # v1.9.9.45：历史行现在带 tid，要同时按 id 清——只按标题
+                # 已经匹配不到新写入的行了
+                self.store.purge_history({_t}, only_today=True,
+                                         tids={task.get("id")})
             self.store.save()
             try:
                 if self._hist_win is not None and self._hist_win.winfo_exists():
@@ -4476,8 +4807,27 @@ class NoteApp(object):
                 self.store.tasks.insert(idx, old)
             else:
                 self.store.tasks.insert(0, old)
+            # v1.9.9.45：删除时只清了今天的历史行，撤回要把今天这条补回来
+            try:
+                self.store.sync_history()
+            except Exception:
+                pass
             self.store.save()
             self.refresh_tasks(scroll_top=True)
+            return tr("undo_generic_done", label=label)
+        if kind == "note_del":
+            note = rec.get("note")
+            if not note:
+                return tr("undo_none")
+            notes = list(getattr(self.store, "notes", []) or [])
+            idx = rec.get("index")
+            if isinstance(idx, int) and 0 <= idx <= len(notes):
+                notes.insert(idx, note)
+            else:
+                notes.append(note)
+            self.store.notes = notes
+            self.store.save()
+            self.refresh_notes()
             return tr("undo_generic_done", label=label)
         task = None
         for t in self.store.tasks:
@@ -4963,6 +5313,13 @@ class NoteApp(object):
         if self._dup_ok_re().search(text):
             self._add_single(pd["title"], pd["hhmm"], pd["score"],
                              pd["dur"], override=pd["new_title"])
+            try:
+                ok = getattr(self, "_dup_pass", None)
+                if ok is None:
+                    ok = self._dup_pass = {}
+                ok[pd["title"]] = time.time()
+            except Exception:
+                pass
             return True, tr("dup_added", title=pd["new_title"])
         # 其他回答：放弃确认，按普通输入继续解析
         return False, None
@@ -5077,6 +5434,20 @@ class NoteApp(object):
                 score = scores[letter_m.group(1).upper()]
                 title = _re_ad.sub(r"[，,、；;]?\s*[ABCD]\s*$", "", title).strip() or title
             similar = self._find_similar(title)
+            # v1.9.9.45：批量录入同名任务时不再每条都拦。用户在 2 分钟内
+            # 对同一个标题答过一次「就这个」，说明他就是要重复建，
+            # 后面同名条目直接建（旧版 20 条只落 1 条，用户体验极差）。
+            _batch_new = None
+            if similar is not None:
+                _ok = getattr(self, "_dup_pass", None) or {}
+                _ts = _ok.get(title)
+                if _ts and (time.time() - _ts) < 120:
+                    # 刚确认过「就这个」→ 后面同名条目一律直接新建，
+                    # 既不弹确认、也不并进已有那条
+                    _n = sum(1 for t in self.store.tasks
+                             if self._same_title(t["title"], title)) + 1
+                    _batch_new = tr("dup_times_fmt", t=title, n=_n)
+                    similar = None
             if similar is not None:
                 # 有相似任务：不默默合并，先问用户（记次数区分）
                 n = sum(1 for t in self.store.tasks
@@ -5085,6 +5456,9 @@ class NoteApp(object):
                 self._pending_dup = {"title": title, "new_title": new_title,
                                      "hhmm": hhmm, "score": score, "dur": dur}
                 return tr("dup_ask", title=similar, new=new_title)
+            if _batch_new:
+                self._add_single(title, hhmm, score, dur, override=_batch_new)
+                continue
             dup = None
             for task in self.store.tasks:
                 # v1.9.9.32：日常任务即使今天已打卡（done=True）也算同名，
@@ -5250,8 +5624,10 @@ class NoteApp(object):
         self.flash(tr("tab_note") if mode == "note" else tr("tab_todo"))
 
     def add_note(self, text):
+        # v1.9.9.45：不再截断到 200 字——粘一段长笔记只剩前 200 字是
+        # 不可逆的内容丢失。显示层按行高省略，存储保留全文。
         note = {"id": "%d%03d" % (int(time.time() * 1000), random.randint(0, 999)),
-                "text": text[:200], "created": dt.datetime.now().strftime("%H:%M"),
+                "text": text, "created": dt.datetime.now().strftime("%H:%M"),
                 "day": self.store._today()}
         self.store.notes = (getattr(self.store, "notes", []) or []) + [note]
         self.store.save()
@@ -5259,11 +5635,24 @@ class NoteApp(object):
         self.push_tr("bot", "note_saved")
 
     def _del_note(self, nid):
-        self.store.notes = [n for n in (getattr(self.store, "notes", []) or [])
-                            if n["id"] != nid]
+        """删除便签（v1.9.9.45：可撤回）。
+
+        便签最容易误操作（悬停就出现删除键），旧版删了没有任何兜底。"""
+        notes = getattr(self.store, "notes", []) or []
+        target = None
+        idx = None
+        for i, n in enumerate(notes):
+            if n["id"] == nid:
+                target, idx = n, i
+                break
+        if target is None:
+            return
+        self.store.notes = [n for n in notes if n["id"] != nid]
+        self._push_undo({"kind": "note_del", "note": dict(target),
+                         "index": idx, "label": "删除便签"})
         self.store.save()
         self.refresh_notes()
-        self.flash(tr("note_deleted"))
+        self.flash(tr("note_deleted_undo"))
 
     def _note_menu(self, e, nid):
         """便签右键菜单：编辑 / 删除（v1.9.8，与待办一致）"""
@@ -5312,6 +5701,11 @@ class NoteApp(object):
         e.insert(0, note["text"])
         e.select_range(0, "end")
         self._activate_window(focus_entry=False)   # 别抢编辑框的焦点
+        try:
+            e.focus_force()
+            e.after(40, lambda: e.winfo_exists() and e.focus_force())
+        except Exception:
+            pass
         e.focus_set()
         try:
             e.focus_force()
@@ -5730,6 +6124,10 @@ class NoteApp(object):
         if self._tray_ok():
             self.hide_to_tray()
             return
+        # v1.9.9.45：托盘不可用时不改「关窗只隐藏」的行为（v1.9.9.24 用户
+        # 明确要求），但保证**一定还有第二条退出路径**：聊天栏的「退出」
+        # 和右键菜单里的「退出」不依赖托盘，见 _quote_bar_menu / 托盘缺失
+        # 时的兜底提示。
         # 托盘未就绪/不可用：仍然只藏窗口。延迟一点再提示托盘状态，
         # 避免 flash 在窗口已隐藏时白白执行。
         try:
@@ -5768,6 +6166,9 @@ class NoteApp(object):
         m = tk.Menu(self.root, tearoff=0)
         m.add_command(label=tr("tray_show"), command=self.restore_from_tray)
         m.add_command(label=tr("quote_roll"), command=lambda: self.roll_quote(manual=True))
+        # v1.9.9.45：不依赖托盘的退出入口（托盘不可用时不再只剩强杀一条路）
+        m.add_separator()
+        m.add_command(label=tr("tray_quit"), command=self.quit)
         try:
             m.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
         finally:
@@ -6130,6 +6531,12 @@ class NoteApp(object):
             pass
         e.bind("<Button-1>", lambda ev: (e.focus_force(),
                                          e.icursor(e.index("@%d" % ev.x))))
+        # v1.9.9.45：再补一次延迟聚焦。Windows 上 SetForegroundWindow/
+        # SetFocus 之后，焦点可能又被拉回根窗口，导致第一个字打不进编辑框
+        try:
+            e.after(40, lambda: e.winfo_exists() and e.focus_force())
+        except Exception:
+            pass
         self._edit_entry = e      # 全局点击收编（见 _global_edit_click）
         self._edit_opened_t = time.time()   # 刚弹出：放行同一次点击（v1.9.3）
 
@@ -6151,7 +6558,9 @@ class NoteApp(object):
                 # v1.9.9.5：改名后历史里不能留着旧名字（历史按标题合并，
                 # 旧标题行会被永久遗留）。清掉旧行、按新名字重新归档。
                 if _old and _old != val:
-                    self.store.purge_history({_old})
+                    # v1.9.9.45：只改今天的历史行；往日记录保持当时的名字
+                    self.store.purge_history({_old}, only_today=True,
+                                             tids={task.get("id")})
                     self.store.sync_history()
                 self.store.save()
             try:
@@ -6232,8 +6641,10 @@ class NoteApp(object):
             if not target.get("manual"):
                 target["score"] = core.score_task(val, val, target.get("hhmm"))
             # v1.9.9.5：改名同步清历史旧行（同 begin_edit 的 commit）
+            # v1.9.9.45：只清今天，且按 id 精确匹配（同名任务不再互相牵连）
             if _old:
-                self.store.purge_history({_old})
+                self.store.purge_history({_old}, only_today=True,
+                                         tids={target.get("id")})
                 self.store.sync_history()
             self.store.save()
         self.refresh_tasks()
@@ -6338,7 +6749,9 @@ class NoteApp(object):
                                  "label": "删除【%s】" % t.get("title", "")})
         self.store.tasks = [t for t in self.store.tasks if t["id"] != tid]
         if titles:
-            self.store.purge_history(titles)
+            # v1.9.9.45：只清**今天**这条的历史。旧版按标题清所有天——
+            # 昨天的「买牛奶」是真实完成过的记录，不该跟着一起消失
+            self.store.purge_history(titles, only_today=True, tids={tid})
         self.store.save()
         self.refresh_tasks()
 
@@ -7323,43 +7736,51 @@ class NoteApp(object):
         now = dt.datetime.now()
         fired = []       # 这一轮命中的任务，批量处理避免反复全量重绘
         for t in self.store.tasks:
-            if t.get("done"):
-                continue
-            if not t.get("hhmm") and not t.get("remind_at"):
-                continue
-            if not t.get("remind_before") and not t.get("remind_at"):
-                continue
-            rep = t.get("repeat")
-            if rep:
-                # 周期任务：今天不该做就跳过；跨天了就重置提醒标记
-                if not core.repeat_due_today(rep):
+            # v1.9.9.45：**逐条容错**。旧版一条任务的时间写坏（手改文件、
+            # 旧数据残留）就会让 split(":") 抛 ValueError，整个循环中断 →
+            # 从那一刻起所有任务都不再提醒，而且调用处把异常吞了。
+            try:
+                if t.get("done"):
                     continue
-                if t.get("reminded_day") != self.store._today():
-                    t["reminded"] = False
-            elif t.get("due_date") and t["due_date"] != self.store._today():
-                continue
-            if t.get("reminded"):
-                continue
-            # ① 用户指定了「几点提醒」：到点直接播报
-            rat = t.get("remind_at")
-            if rat and len(rat) == 5:
-                target_day = now.date() - dt.timedelta(days=t.get("remind_day") or 0)
-                if now.date() != target_day:
+                if not t.get("hhmm") and not t.get("remind_at"):
                     continue
-                h2, m2 = rat.split(":")
-                at2 = now.replace(hour=int(h2), minute=int(m2), second=0)
-                if at2 <= now <= at2 + dt.timedelta(minutes=30):
+                if not t.get("remind_before") and not t.get("remind_at"):
+                    continue
+                rep = t.get("repeat")
+                if rep:
+                    # 周期任务：今天不该做就跳过；跨天了就重置提醒标记
+                    if not core.repeat_due_today(rep):
+                        continue
+                    if t.get("reminded_day") != self.store._today():
+                        t["reminded"] = False
+                elif t.get("due_date") and t["due_date"] != self.store._today():
+                    continue
+                if t.get("reminded"):
+                    continue
+                # ① 用户指定了「几点提醒」：到点直接播报
+                rat = t.get("remind_at")
+                if rat and len(rat) == 5:
+                    target_day = now.date() - dt.timedelta(days=t.get("remind_day") or 0)
+                    if now.date() != target_day:
+                        continue
+                    h2, m2 = rat.split(":")
+                    at2 = now.replace(hour=int(h2), minute=int(m2), second=0)
+                    if at2 <= now <= at2 + dt.timedelta(minutes=30):
+                        t["reminded"] = True
+                        t["reminded_day"] = self.store._today()
+                        fired.append((t, "at"))
+                    continue
+                h, mi = t["hhmm"].split(":")
+                due = now.replace(hour=int(h), minute=int(mi), second=0)
+                at = due - dt.timedelta(minutes=int(t.get("remind_before") or 0))
+                if at <= now <= due + dt.timedelta(minutes=1):
                     t["reminded"] = True
                     t["reminded_day"] = self.store._today()
-                    fired.append((t, "at"))
+                    fired.append((t, "before"))
+            except Exception as exc:
+                self.diag("[remind] 跳过坏数据 %r id=%r hhmm=%r" % (
+                    exc, t.get("id"), t.get("hhmm")))
                 continue
-            h, mi = t["hhmm"].split(":")
-            due = now.replace(hour=int(h), minute=int(mi), second=0)
-            at = due - dt.timedelta(minutes=t["remind_before"])
-            if at <= now <= due + dt.timedelta(minutes=1):
-                t["reminded"] = True
-                t["reminded_day"] = self.store._today()
-                fired.append((t, "before"))
         if not fired:
             return
         self.store.save()
@@ -7937,6 +8358,9 @@ class NoteApp(object):
         m.add_command(label=tr("export_ics"),
                       command=lambda: self.do_export("ics"))
         m.add_separator()
+        # v1.9.9.45：能导出不能导入 = 备份不可恢复。补上恢复入口，
+        # 恢复前先把当前数据另存一份，避免「恢复」变成第二次事故。
+        m.add_command(label=tr("import_json"), command=self.restore_from_json)
         m.add_command(label=tr("export_open_dir"),
                       command=self.open_data_dir)
         try:
@@ -7948,6 +8372,67 @@ class NoteApp(object):
         finally:
             m.grab_release()
 
+    def restore_from_json(self):
+        """从导出的 JSON 恢复任务 / 历史 / 对话（v1.9.9.45）。
+
+        恢复前会先把当前 tasks.json 另存一份 `.before-import-时间戳`，
+        万一选错文件还能回到原样。主题/语言不跟着改（会牵动整套界面
+        重建，留给设置里手动选）。"""
+        from tkinter import filedialog, messagebox
+        try:
+            p = filedialog.askopenfilename(
+                title=tr("import_title"), initialdir=data_dir(),
+                filetypes=[("JSON", "*.json"), (tr("all_files"), "*.*")])
+        except Exception:
+            p = None
+        if not p:
+            return
+        try:
+            with open(p, "r", encoding="utf-8-sig") as f:
+                obj = json.load(f)
+        except Exception as exc:
+            self.push("bot", tr("import_fail", e=str(exc)))
+            return
+        if not isinstance(obj, dict):
+            self.push("bot", tr("import_fail", e="not json object"))
+            return
+        tasks = obj.get("tasks")
+        if not isinstance(tasks, list):
+            self.push("bot", tr("import_fail", e="no tasks"))
+            return
+        if not messagebox.askyesno(
+                self.app_name(), tr("import_confirm", n=len(tasks))):
+            return
+        # 先保命：当前数据另存一份
+        try:
+            ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            shutil.copy2(self.store.path, self.store.path + ".before-import-" + ts)
+        except Exception:
+            pass
+        self.store.tasks = [t for t in tasks if isinstance(t, dict)]
+        hist = obj.get("history")
+        if isinstance(hist, dict):
+            self.store.history = {k: v for k, v in hist.items()
+                                  if isinstance(v, list)}
+        msgs = obj.get("messages")
+        if isinstance(msgs, list):
+            self.store.messages = msgs[-MSG_KEEP:]
+        st = obj.get("settings") or {}
+        try:
+            if st.get("user_name"):
+                self.store.user_name = str(st["user_name"])
+        except Exception:
+            pass
+        self.store.save()
+        try:
+            self.store.save_history()
+        except Exception:
+            pass
+        self.refresh_tasks()
+        self.render_messages()
+        self.draw_bar()
+        self.push("bot", tr("import_ok", n=len(self.store.tasks), p=p))
+
     def open_data_dir(self):
         """在资源管理器里打开数据目录（方便用户自己拿备份）"""
         try:
@@ -7955,9 +8440,11 @@ class NoteApp(object):
             if os.name == "nt":
                 os.startfile(d)
             elif sys.platform == "darwin":
-                os.system('open "%s"' % d)
+                subprocess.Popen(["open", d])
             else:
-                os.system('xdg-open "%s" >/dev/null 2>&1 &' % d)
+                subprocess.Popen(["xdg-open", d],
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
         except Exception:
             self.push("bot", tr("export_dir_fail", d=data_dir()))
 
@@ -7967,7 +8454,9 @@ class NoteApp(object):
             import exporter as _exp
             self.store.sync_history()
             ext = {"json": "json", "md": "md", "ics": "ics"}[kind]
-            stamp = dt.datetime.now().strftime("%Y%m%d-%H%M")
+            # v1.9.9.45：精确到秒。旧版到分钟，一分钟内导两次后一次
+            # 直接覆盖前一次（用户以为有两份备份，其实只有一份）
+            stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
             name = _exp.safe_name("每日记事本-%s.%s" % (stamp, ext))
             path = os.path.join(data_dir(), name)
             if kind == "json":
@@ -7975,16 +8464,20 @@ class NoteApp(object):
                                     {"user_name": self.nickname,
                                      "theme": self.store.theme,
                                      "lang": self.store.lang,
-                                     "version": VERSION})
-                mode = "w"
+                                     "font_scale": self.store.font_scale,
+                                     "alpha": self.store.alpha,
+                                     "bell_mode": self.store.bell_mode,
+                                     "version": VERSION},
+                                    messages=self.store.messages)
             elif kind == "md":
                 data = _exp.to_markdown(self.store.tasks, self.store.history)
-                mode = "w"
             else:
                 data = _exp.to_ics(self.store.tasks, self.store.history)
-                mode = "w"
-            with open(path, mode, encoding="utf-8", newline="") as f:
+            # 先写临时文件再替换：导到一半失败不会留下半截文件
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8", newline="") as f:
                 f.write(data)
+            os.replace(tmp, path)
             self.push("bot", tr("export_ok", p=path))
             return path
         except Exception as exc:
@@ -8251,18 +8744,25 @@ def _ensure_desktop_shortcut():
             if not os.path.isfile(ico):
                 png = os.path.join(progdir, "assets", "icon.png")
                 ico = png if os.path.isfile(png) else ""
-            icon_part = ("$s.IconLocation='%s,0';" % ico) if ico else ""
+            # v1.9.9.45：路径里的单引号在 PowerShell 单引号串里要写成两个；
+            # 旧版直接拼 '%s'，用户名是 O'Brien 这类会语法错误，快捷方式
+            # 建不出来（极端情况下还被当成命令注入）
+            def _psq(p):
+                return "'" + str(p).replace("'", "''") + "'"
+
+            icon_part = ("$s.IconLocation=%s;" % _psq(ico + ",0")) if ico else ""
             ps = "$ws=New-Object -ComObject WScript.Shell;"
             for d in targets:
                 lnk = os.path.join(d, "每日记事本.lnk")
-                ps += ("$s=$ws.CreateShortcut('%s');"
-                       "$s.TargetPath='%s';" % (lnk, target))
+                ps += ("$s=$ws.CreateShortcut(%s);"
+                       "$s.TargetPath=%s;" % (_psq(lnk), _psq(target)))
                 if getattr(sys, "frozen", False):
-                    ps += "$s.WorkingDirectory='%s';" % progdir
+                    ps += "$s.WorkingDirectory=%s;" % _psq(progdir)
                 else:
-                    ps += ("$s.Arguments='\"%s\"';"
-                           "$s.WorkingDirectory='%s';"
-                           % (os.path.join(progdir, "main.py"), progdir))
+                    ps += ("$s.Arguments=%s;"
+                           "$s.WorkingDirectory=%s;"
+                           % (_psq('"%s"' % os.path.join(progdir, "main.py")),
+                              _psq(progdir)))
                 ps += icon_part + "$s.Save();"
             # ③ 刷新图标缓存：让资源管理器重新读取 lnk 的图标
             #   ie4uinit.exe -show 会重建 iconcache，比手删 db 安全
@@ -8424,6 +8924,11 @@ def main():
         # 截止时间提醒
         try:
             app.check_reminders()
+        except Exception:
+            pass
+        # v1.9.9.45：保存失败要持续可见（磁盘满 / 文件被占用）
+        try:
+            app._check_save_error()
         except Exception:
             pass
         # 每分钟检查跨天

@@ -1448,7 +1448,8 @@ def parse_tasks(text, fallback=True):
                                  or find_repeat(seg),
                                  seg_due or prev_due)
             continue
-        title = title[:24]
+        # v1.9.9.45：不再把标题硬截断到 24 字——显示层已有省略号，
+        # 存储层截断是不可逆的信息丢失（导出也会跟着缺半句）
         if title in seen:
             continue
         seen.add(title)
@@ -1467,7 +1468,7 @@ def parse_tasks(text, fallback=True):
         due_d, due_raw = find_deadline_date(text)
         title = clean_title(text, [t[2] for t in times] +
                             [r for r in (dur_raw, due_raw) if r])
-        title = re.sub(r"^(?:帮我|请|麻烦|记得|别忘了|我要|我想|需要|得|今天)+", "", title)[:24]
+        title = re.sub(r"^(?:帮我|请|麻烦|记得|别忘了|我要|我想|需要|得|今天)+", "", title)
         if not _is_noise(title) and len(title) >= 2:
             results.append((title, hhmm, score_task(title, text, hhmm),
                             text, dur, find_repeat(text), due_d))
