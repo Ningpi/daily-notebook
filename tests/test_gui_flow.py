@@ -1565,8 +1565,11 @@ class TestV199927DailyList:
         self._daily(a, "跑步", hhmm="19:00")
         self._tmp(a, "买牛奶")
         a.refresh_tasks()
-        txt = a.counter.cget("text")
-        assert "0/2" in txt and "1" in txt, txt
+        # v1.9.9.46：计数拆两段双色——日常段青色标签、临时段灰色标签
+        d_txt = a.counter_d.cget("text")
+        t_txt = a.counter.cget("text")
+        assert d_txt == "日常任务 0/2", d_txt
+        assert "临时任务 0/1" in t_txt, t_txt
 
     def test_counter_plain_without_daily(self, app):
         a = self._fresh(app)
@@ -1862,8 +1865,9 @@ class TestV199941:
              "score": 45, "manual": True, "created": "09:00"},
         ]
         a.refresh_tasks()
-        txt = a.counter.cget("text")
-        assert txt == "日常任务 1/1 · 临时任务 1/2", txt
+        # v1.9.9.46：拆两段双色（日常青色 / 临时灰色，与分组头一致）
+        assert a.counter_d.cget("text") == "日常任务 1/1", a.counter_d.cget("text")
+        assert a.counter.cget("text") == "· 临时任务 1/2", a.counter.cget("text")
 
     def test_messages_not_trimmed_at_60(self, app):
         a = app
@@ -2011,8 +2015,9 @@ class TestV199943:
         ]
         a._ensure_bubble()          # 气泡正常启动 600ms 后才建，测试里直接建
         order = [t["id"] for t in a._bubble._ordered()]
-        # 今天的日常最前（按时刻），然后临时（按分数），不在今天的日常垫底
-        assert order == ["d1", "t2", "t1", "d2"], order
+        # v1.9.9.46：今天的日常最前（按时刻），然后临时（按分数）；
+        # 不在今天的日常不再进气泡（与主列表/进度条同口径）
+        assert order == ["d1", "t2", "t1"], order
 
 
 # =====================================================================

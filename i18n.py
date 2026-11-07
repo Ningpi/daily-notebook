@@ -106,7 +106,7 @@ STRINGS = {
     "tab_todo": ("待办", "To-do"),
     "tab_note": ("便签", "Notes"),
     "note_ph": ("记点事情…", "Jot something..."),
-    "note_saved": ("便签已贴好", "Note saved"),
+    "note_saved": ("便签已贴好：{t}", "Note saved: {t}"),
     "note_del": ("删除", "Delete"),
     "note_deleted": ("便签已删除", "Note deleted"),
     "cal_btn": ("日历", "Calendar"),
@@ -154,7 +154,7 @@ STRINGS = {
     "cal_day_tasks": ("共 {n} 件（已完成 {d}）", "{n} tasks ({d} done)"),
     "cal_day_empty": ("这天没有安排", "Nothing scheduled"),
     "alpha_btn": ("透明度", "Opacity"),
-    "alpha_title": ("透明度：拖到左边更透，右边更实", "Opacity (drag left)"),
+    "alpha_title": ("透明度", "Opacity"),
     "cal_title": ("日历 · 每日记事本", "Calendar · Daily Note"),
     "ask_remind_short": ("需要我提前多久提醒？{opts}",
                          "Remind you early? {opts}"),
@@ -331,6 +331,8 @@ STRINGS = {
                    "Type below and press Enter"),
     "empty_hint": ("今天还没有任务", "No tasks yet"),
     "empty_add": ("＋ 记一条", "+ Add one"),
+    # v1.9.9.46：便签空态提示（与待办页一致）
+    "empty_note_hint": ("还没有便签，在下面输入、回车就贴好", "No notes yet. Type below and press Enter"),
     "to_tray": ("已收进系统托盘，提醒照常，点托盘图标可打开。",
                 "Minimized to tray — reminders still work. Click the tray icon to reopen."),
     "to_tray_notify": ("在后台继续守着你的提醒，点图标可打开。",
@@ -391,15 +393,19 @@ STRINGS = {
                           "Okay, I'll call you {name} from now on (was {old})."),
     "usage_guide": (
         "小技巧：\n"
-        "· 直接打字就能建任务，如「明天下午3点前交报告」\n"
-        "· 说「列表」看待办，「今天做了什么」看完成；日常任务说「背单词打卡了」即可打卡\n"
-        "· 建错了说「撤回」\n"
-        "· 双击任务可改名，右键有更多操作",
+        "1. 直接打字建临时任务，如「明天下午3点交报告」\n"
+        "2. 带上「每天/每周几」就是日常任务\n"
+        "   如「每天早上7点背单词」「每周一20:00背历史书」\n"
+        "3. 底栏「日常」可查看、修改所有日常任务\n"
+        "4. 建错了说「撤回」；问「我还有什么没完成」看未完成\n"
+        "5. 双击任务改名，右键有更多操作",
         "Tips:\n"
-        "· Just type to add a task, e.g. \"submit report by 3pm tomorrow\"\n"
-        "· Say \"list\" for to-dos, \"what did I do today\" for done; daily tasks: \"checked in vocabulary\"\n"
-        "· Made a mistake? Say \"undo\"\n"
-        "· Double-click a task to rename; right-click for more"),
+        "1. Just type to add a one-off task, e.g. \"report by 3pm tomorrow\"\n"
+        "2. Include \"every day / every Monday\" to make it a daily task\n"
+        "   e.g. \"vocabulary at 7am every day\"\n"
+        "3. Tap \"Daily\" below to view and edit all daily tasks\n"
+        "4. Mistake? Say \"undo\"; ask \"what's left\" for open items\n"
+        "5. Double-click a task to rename; right-click for more"),
     "font_size": ("字体大小", "Font size"),
     "text_dark": ("字体深浅", "Text shade"),
     "save_warn": ("⚠️ 提醒一下：当前目录没有写入权限，任务可能存不下来。"
@@ -526,6 +532,25 @@ STRINGS = {
     "daily_only": ("日常任务 {d}/{n}", "Daily {d}/{n}"),
     "counter_plain": ("临时任务 {td}/{tt}", "One-off {td}/{tt}"),
     "daily_tip": ("这是每天都要做的事", "This is a daily task"),
+
+    # —— v1.9.9.46：底栏「日常」按钮 + 日常任务管理窗
+    "daily_btn": ("日常", "Daily"),
+    "daily_btn_s": ("日常", "Dly"),
+    "daily_mgr_title": ("日常任务", "Daily Tasks"),
+    "daily_mgr_hint": ("点击任务可查看详情、改时间或删除；主窗口只显示今天该做的",
+                       "Click a task for details; the main list shows today's only"),
+    "daily_mgr_col_freq": ("频率", "Freq"),
+    "daily_mgr_col_time": ("时间", "Time"),
+    "daily_mgr_col_streak": ("连续", "Streak"),
+    "daily_mgr_today_yes": ("今天该做", "Due today"),
+    "daily_mgr_today_no": ("今天不用", "Not today"),
+    "daily_mgr_done": ("今天已打卡", "Done today"),
+    "daily_mgr_empty": ("还没有日常任务。建任务时带上「每天/每周几」即可，\n如「每天早上7点背单词」",
+                        "No daily tasks yet. Include \"every day\" or \"every Monday\" when adding"),
+    "daily_mgr_days": ("{n} 天", "{n}d"),
+    # v1.9.9.46：底栏计数拆成两段（日常段青色 / 临时段灰色）
+    "cnt_daily": ("日常任务 {d}/{n}", "Daily {d}/{n}"),
+    "cnt_temp": ("· 临时任务 {td}/{tt}", "· One-off {td}/{tt}"),
 }
 
 

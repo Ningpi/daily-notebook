@@ -27,7 +27,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.45"
+VERSION = "1.9.9.46"
 
 # 对话消息最多保留条数。v1.9.9.40 及以前是 60——聊天一多旧记录
 # 被三处 [-60:] 硬裁剪**永久删除**（读盘/写盘/追加各一处），用户
@@ -401,7 +401,7 @@ class Store(object):
             "note_pos": getattr(self, "note_pos", None),
             "note_geom": getattr(self, "note_geom", None),
             "chat_h": getattr(self, "chat_h", None),
-            "alpha": round(float(getattr(self, "alpha", 0.88)), 2),
+            "alpha": round(float(getattr(self, "alpha", 0.95)), 2),
             "user_name": getattr(self, "user_name", ""),
             "bot_name": getattr(self, "bot_name", ""),
             "setup_stage": int(getattr(self, "setup_stage", 0)),
@@ -719,7 +719,12 @@ class IconCache(object):
         if not os.path.exists(path):
             return None
         try:
-            img = tk.PhotoImage(file=path)
+            # v1.9.9.46：必须绑到 owner 的解释器上。旧版无 master，
+            # PhotoImage 落在「默认 root」——多实例（或先建的 root 已销毁）
+            # 时图片注册在死解释器里，控件一用就报
+            # 「image "pyimageN" doesn't exist」，右下角气泡直接建不出来
+            img = tk.PhotoImage(file=path, master=owner) \
+                if owner is not None else tk.PhotoImage(file=path)
         except Exception:
             return None
         cls._cache[key] = img
@@ -1004,7 +1009,7 @@ class Bubble(object):
 
     def _apply_alpha(self):
         try:
-            self.win.attributes("-alpha", getattr(self.app.store, "alpha", 0.88))
+            self.win.attributes("-alpha", getattr(self.app.store, "alpha", 0.95))
         except Exception:
             pass
 
@@ -1019,7 +1024,11 @@ class Bubble(object):
             pass
 
     def _undone(self):
-        return [t for t in self.app.store.tasks if not t.get("done")]
+        # v1.9.9.46：气泡只算「今天的事」——非今天的日常（每周一任务）
+        # 不再出现，与主列表/进度条同一口径
+        return [t for t in self.app.store.tasks
+                if not t.get("done")
+                and (not self.app._is_daily(t) or self.app._daily_due_today(t))]
 
     def _ordered(self):
         """气泡展开顺序（v1.9.9.43：与主列表同构——今天的日常在最上）
@@ -1204,7 +1213,7 @@ class Bubble(object):
             try:
                 row.overrideredirect(True)
                 row.attributes("-topmost", True)
-                row.attributes("-alpha", getattr(self.app.store, "alpha", 0.88))
+                row.attributes("-alpha", getattr(self.app.store, "alpha", 0.95))
             except Exception:
                 pass
             row.configure(bg=C.LINE)
@@ -1364,8 +1373,13 @@ class NoteApp(object):
             return
         try:
             self._bubble = Bubble(self)
-        except Exception:
+        except Exception as _e:
             self._bubble = None
+            # v1.9.9.46：别把失败原因吞干净——记下来方便排查
+            try:
+                self.diag("[EXC] bubble create %r" % (_e,))
+            except Exception:
+                pass
 
     def toggle_bubble(self):
         self.store.bubble_enabled = not getattr(self.store, "bubble_enabled", True)
@@ -1707,7 +1721,9 @@ class NoteApp(object):
     def build_ui(self):
         r = self.root
         # 哲言行（最底一行：日期靠左 + 哲言靠右，同一行 v1.9.3）
-        self.quote_row = tk.Frame(r, bg=C.BG, height=18)
+        # v1.9.9.46：去掉写死的 height=18——字体调大后文字被上下裁掉
+        # （「时钟」「今天 x月x日」显示不全），改成按内容自适应
+        self.quote_row = tk.Frame(r, bg=C.BG)
         self.quote_row.pack(side="bottom", fill="x", padx=10, pady=(0, 1))
         self.f_note = tk.Label(self.quote_row, text=self.today_text(),
                                bg=C.BG, fg=C.SUB, font=self.f_tiny, anchor="w")
@@ -1726,13 +1742,17 @@ class NoteApp(object):
         self.quote_lbl.bind("<Leave>", lambda e: self.quote_lbl.config(fg=C.SUB))
 
         # 托盘按钮（纯功能键，不再放日期）
-        self.foot = tk.Frame(r, bg=C.BG, height=16)
+        self.foot = tk.Frame(r, bg=C.BG)
         self.foot.pack(side="bottom", fill="x", padx=8, pady=(0, 2))
-        # 互动提示：悬浮在功能栏上方（place 浮层，不占功能栏的空间）
-        self.f_hint = tk.Label(r, text="", bg=C.HEAD, fg=C.TEXT, font=self.f_tiny,
-                               padx=6, pady=1)
-        self.f_hint.place(relx=1.0, rely=1.0, x=-6, y=-40, anchor="se")
-        self.f_hint.lift()
+        # v1.9.9.46：互动提示改为**独占一行**（在功能栏上方预留）。
+        # 旧版是 place 浮层叠在功能栏上，一闪提示就和「气泡 透明度 历史」
+        # 叠成一团乱码（实测：点「记一条」时出现一行图案，过几秒消失）。
+        # 预留一行虽然多占十几个像素，但提示任何时候都不会盖住按钮。
+        self.hint_row = tk.Frame(r, bg=C.BG)
+        self.hint_row.pack(side="bottom", fill="x", padx=10)
+        self.f_hint = tk.Label(self.hint_row, text="", bg=C.BG, fg=C.ACCENT,
+                               font=self.f_tiny, anchor="e")
+        self.f_hint.pack(fill="x")
         self.clock_btn = tk.Label(self.foot, text=tr("clock_btn"), bg=C.BG, fg=C.SUB,
                                   font=self.f_tiny, cursor="hand2", padx=4)
         self.clock_btn.pack(side="right")
@@ -1766,6 +1786,20 @@ class NoteApp(object):
         self.bubble_btn.bind("<Enter>", lambda e: self.bubble_btn.config(fg=C.ACCENT))
         self.bubble_btn.bind("<Leave>", lambda e: self.bubble_btn.config(
             fg=C.ACCENT if getattr(self.store, "bubble_enabled", True) else C.SUB))
+        # v1.9.9.46：「日常」按钮——打开日常任务管理窗（所有日常任务集中
+        # 查看/修改）。主窗口只放今天的日常，非今天的（如每周一）进这里
+        self.daily_btn = tk.Label(self.foot, text=tr("daily_btn"), bg=C.BG, fg=C.SUB,
+                                  font=self.f_tiny, cursor="hand2", padx=4)
+        self.daily_btn.pack(side="right", padx=(0, 8))
+        self.daily_btn.bind("<Button-1>", lambda e: self.open_daily_manager())
+        self.daily_btn.bind("<Enter>", lambda e: self.daily_btn.config(fg=C_DAILY))
+        self.daily_btn.bind("<Leave>", lambda e: self.daily_btn.config(fg=C.SUB))
+
+        # v1.9.9.46：窗口高度变化时保持「聊天区 : 任务列表」的比例（默认
+        # 上 6 下 4 的观感），用户拖过分隔条就记住用户的比例。
+        # 拖窗口边缘缩放不再是「聊天区纹丝不动、列表被压扁」。
+        r.bind("<Configure>", lambda e: self.debounce("ratio", self._apply_split_ratio, 60),
+               add="+")
 
         # 标题栏
         self.head = Canvas(r, height=28)
@@ -1869,9 +1903,14 @@ class NoteApp(object):
         self.tab_note.pack(side="left", padx=(8, 0))
         self.tab_todo.bind("<Button-1>", lambda e: self.switch_mode("task"))
         self.tab_note.bind("<Button-1>", lambda e: self.switch_mode("note"))
+        # v1.9.9.46：计数拆成两段双色——「日常任务 x/y」用日常青（与下方
+        # 日常分组头同色），「临时任务 x/y」用分组头的灰，一眼对上号
+        self.counter_d = tk.Label(self.list_head, text="", bg=C.BG, fg=C_DAILY,
+                                  font=self.f_tiny, anchor="w")
+        self.counter_d.pack(side="left", padx=(10, 0))
         self.counter = tk.Label(self.list_head, text="", bg=C.BG, fg=C.SUB,
                                 font=self.f_tiny, anchor="w")
-        self.counter.pack(side="left", padx=(10, 0))
+        self.counter.pack(side="left")
         self.clear_btn = tk.Label(self.list_head, text=tr("clear_done"), bg=C.BG, fg=C.SUB,
                                   font=self.f_tiny, cursor="hand2")
         self.clear_btn.pack(side="right")
@@ -1920,6 +1959,7 @@ class NoteApp(object):
             (self.cal_btn, "cal_btn", "cal_btn_s"),
             (self.hist_btn, "history_btn", "hist_btn_s"),
             (self.alpha_btn, "alpha_btn", "alpha_btn_s"),
+            (self.daily_btn, "daily_btn", "daily_btn_s"),
             (self.bubble_btn, "bubble_btn", "bubble_btn_s"),
         ]
 
@@ -2130,9 +2170,19 @@ class NoteApp(object):
 
     # ---------------- 进度条
     def progress_state(self):
-        """返回 (已完成, 总数, 进度0~1)"""
-        total = len(self.store.tasks)
-        done = sum(1 for t in self.store.tasks if t.get("done"))
+        """返回 (已完成, 总数, 进度0~1)
+
+        v1.9.9.46：只数「今天的事」——临时任务全部 + 今天该做的日常。
+        非今天的日常（每周一的任务）以前也被算进分母，今天永远到不了
+        100%，进度条像卡了 bug（用户实测问题 15）。"""
+        total = 0
+        done = 0
+        for t in self.store.tasks:
+            if self._is_daily(t) and not self._daily_due_today(t):
+                continue
+            total += 1
+            if t.get("done"):
+                done += 1
         return done, total, (done / total if total else 0.0)
 
     def bar_color(self, ratio):
@@ -2166,20 +2216,28 @@ class NoteApp(object):
         return dtoday, dn, tmp_left, tmp_total - tmp_left, tmp_total
 
     def _counter_text(self, left, done):
-        """底栏计数（v1.9.9.41 统一措辞与格式）
+        """底栏计数（v1.9.9.46 起拆成两段双色标签）
 
-        「日常任务 2/4 · 临时任务 3/7」——两段都用 已完成/总数 格式；
-        只有日常没有临时 → 只显示日常段；只有临时 → 「临时任务 x/y ·
-        已完成 x」。原措辞「今日日常 / 待办」含义含混，一并更名。"""
+        返回 (日常段, 临时段)：日常段青色、临时段灰色，与列表分组头
+        一致。只有日常没有临时 → 只显示日常段，反之亦然。"""
         try:
             n, dn, tmp_left, tmp_done, tmp_total = self._daily_counts()
         except Exception:
             n, dn, tmp_left, tmp_done, tmp_total = 0, 0, left, 0, left
+        d_txt = tr("cnt_daily", d=dn, n=n) if n else ""
         if n and tmp_total:
-            return tr("daily_left", d=dn, n=n, td=tmp_done, tt=tmp_total)
-        if n:
-            return tr("daily_only", d=dn, n=n)
-        return tr("counter_plain", td=tmp_done, tt=tmp_total)
+            t_txt = tr("cnt_temp", td=tmp_done, tt=tmp_total)
+        elif tmp_total:
+            t_txt = tr("counter_plain", td=tmp_done, tt=tmp_total)
+        else:
+            t_txt = ""
+        return d_txt, t_txt
+
+    def _set_counter(self, left, done):
+        """把两段计数写到底栏标签（v1.9.9.46 双色拆分）"""
+        d_txt, t_txt = self._counter_text(left, done)
+        self.counter_d.config(text=d_txt)
+        self.counter.config(text=t_txt)
 
     def draw_bar(self):
         cv = self.bar
@@ -2446,6 +2504,8 @@ class NoteApp(object):
         self.head.configure(bg=C.BG)
         self.bar.configure(bg=C.BG)
         self.counter.configure(bg=C.BG, fg=C.SUB)
+        self.counter_d.configure(bg=C.BG, fg=C_DAILY)
+        self.daily_btn.configure(bg=C.BG, fg=C.SUB)
         self.clear_btn.configure(bg=C.BG, fg=C.SUB)
         self.f_note.configure(bg=C.BG, fg=C.SUB)
         self.f_hint.configure(bg=C.BG, fg=C.SUB)
@@ -2670,6 +2730,52 @@ class NoteApp(object):
                 self.store.save()
             except Exception:
                 pass
+            # v1.9.9.46：记住用户手动调好的比例，之后缩放窗口按这个比例走
+            self.root.after(80, self._capture_split_ratio)
+
+    def _capture_split_ratio(self):
+        """记录用户拖分隔条后的「聊天区高度占比」（v1.9.9.46）"""
+        try:
+            ch = self.chat_cv.winfo_height()
+            lh = self.list_cv.winfo_height()
+            if ch > 1 and lh > 1 and ch + lh > 80:
+                self._split_ratio = ch / float(ch + lh)
+        except Exception:
+            pass
+
+    def _apply_split_ratio(self):
+        """窗口高度变化时维持上下比例（v1.9.9.46，用户实测问题 10）。
+
+        旧版聊天区高度写死（chat_h 像素值），缩放窗口时聊天区纹丝不动、
+        整个变化全压在任务列表上，「上 6 下 4」缩一次就变样。现在：
+        - 没拖过分隔条 → 按当前布局算出初始比例并保持；
+        - 拖过 → 用用户的比例；
+        - 用户正在拖分隔条时不插手。"""
+        if getattr(self, "_split", None):
+            return
+        try:
+            ch = self.chat_cv.winfo_height()
+            lh = self.list_cv.winfo_height()
+        except Exception:
+            return
+        if ch <= 1 or lh <= 1:
+            return                       # 首帧还没布局好
+        root_h = self.root.winfo_height()
+        if abs(root_h - getattr(self, "_ratio_root_h", 0)) <= 1:
+            return                       # 高度没变（横向缩放/移动）
+        self._ratio_root_h = root_h
+        ratio = getattr(self, "_split_ratio", None)
+        if ratio is None:
+            ratio = ch / float(ch + lh)
+            self._split_ratio = ratio
+        total = ch + lh
+        new_h = int(round(ratio * total))
+        if abs(new_h - ch) < 2:
+            return
+        new_h = max(40, min(new_h, total - 60))   # 列表至少留 60px
+        if new_h != ch:
+            self.chat_h = new_h
+            self.chat_cv.configure(height=new_h)
 
     def on_grip_press(self, e):
         self._resizing = [e.x_root, e.y_root, self.root.winfo_width(),
@@ -2860,7 +2966,7 @@ class NoteApp(object):
         r = self.root
         if self.overlay:
             r.overrideredirect(True)
-            r.attributes("-alpha", max(0.35, getattr(self.store, "alpha", 0.88) - 0.08))
+            r.attributes("-alpha", max(0.35, getattr(self.store, "alpha", 0.95) - 0.08))
             self.chat_wrap.pack_forget()
             self.input_row.pack_forget()
         else:
@@ -3006,6 +3112,12 @@ class NoteApp(object):
         if not texts:
             texts = [("bot", tr("hello_first"))]
         line_h = 15
+        # v1.9.9.46：行高跟随字体——旧版写死 15px，字体调到 110%~130% 后
+        # 字比行高大，聊天气泡里的字上下叠出边框（用户实测问题 14）
+        try:
+            line_h = max(15, self.real_font(self.f_chat).metrics("linespace") + 3)
+        except Exception:
+            pass
         max_bubble_w = int(w * 0.82)
         items = []
         for role, text in reversed(texts):
@@ -3800,6 +3912,14 @@ class NoteApp(object):
         need_pri = pt.get("need_pri")
         need_dl = pt.get("need_dl")
         m = self._pri_re().search(text)
+        # v1.9.9.46：把「B，没有」这类合并回答拆开——剥掉字母选项后
+        # 剩下的「没有/无」是「不设截止时间」的回答
+        if m and m.group(0).isascii() and m.group(0).isalpha():
+            _stripped = re.sub(r"^[\s，,。.．]*[ABCD][\s，,。.．]*", "",
+                               (text or "").strip(), flags=re.I)
+        else:
+            _stripped = (text or "").strip()
+        _rest_no_dl = bool(self._dl_no_re().search(_stripped)) if _stripped else False
         # v1.9.9.45：字母必须「整句就是选项」才算回答。
         # 旧版在整段文字里 search，于是「处理<b>&特殊符号」里的 b 被当成
         # 「B.重要」，只回一句「优先级：重要」，**整条新任务静默消失**
@@ -3810,10 +3930,15 @@ class NoteApp(object):
             _has_time = bool(self._dl_time_re().search(text)) or bool(
                 re.search(r"[\u4e00-\u9fff]", text or "") and
                 (core.find_times(text or "") or []))
-            if _rest and not _has_time:
+            # v1.9.9.46：剩下的是「没有/无」= 连截止时间一起答了
+            # （「B，没有」→ 重要 + 不设时间）。旧版把「没有」当成
+            # 剩余正文丢给新任务解析，建出一条叫【没有】的任务
+            # （用户实测问题 3）。纯时间回答（「B 晚上8点」）同理放行。
+            if _rest and not _has_time and not _rest_no_dl \
+                    and not self._is_pure_time_reply(_rest):
                 return False, None, text          # 交给新任务解析，不吞
         time_m = self._dl_time_re().search(text)
-        no_dl = bool(self._dl_no_re().search(text))
+        no_dl = bool(self._dl_no_re().search(text)) or _rest_no_dl
         # v1.9.4：优先用 parser 引擎解析回答（支持中文数字「八点」「八点半」
         # 「一刻」、相对天「明天/大后天/3天后」、月日「10月30日」、下周一…）；
         # 中文回答才走引擎，英文回答退回旧正则（am/pm 由它兜底）
@@ -4167,7 +4292,7 @@ class NoteApp(object):
                       bg=C.BG, fg=C.TEXT, troughcolor=C.LINE,
                       highlightthickness=0, bd=0,
                       activebackground=C.ACCENT, sliderrelief="flat")
-        sc.set(int(round(getattr(self.store, "alpha", 0.88) * 100)))
+        sc.set(int(round(getattr(self.store, "alpha", 0.95) * 100)))
         sc.pack(side="left", fill="x", expand=True)
 
         def _apply(_v=None):
@@ -4300,7 +4425,7 @@ class NoteApp(object):
         manual = getattr(self.store, "text_darken", None)
         if manual is not None:
             return round(max(0.0, min(1.0, manual)), 3)
-        a = alpha if alpha is not None else getattr(self.store, "alpha", 0.88)
+        a = alpha if alpha is not None else getattr(self.store, "alpha", 0.95)
         return round(max(0.0, (0.88 - a)) * 0.65, 3)
 
     def _recolor_soft(self):
@@ -4918,7 +5043,7 @@ class NoteApp(object):
         m_note = re.match(r"^(?:记个?便签|便签|帮我记个?便签)[：:，,\s]\s*(.+)$",
                           (text or "").strip())
         if m_note and m_note.group(1).strip():
-            self.add_note(m_note.group(1).strip()[:200])
+            self.add_note(m_note.group(1).strip())
             return _SILENT
         return None
 
@@ -5063,7 +5188,10 @@ class NoteApp(object):
         """「我还有几件 / 完成多少」→ 剩余数量 + 最要紧的一件"""
         if not (pz.QUERY_RE.search(text) and not parsed):
             return None
-        left = [x for x in self.store.tasks if not x.get("done")]
+        # v1.9.9.46：同样只数今天的事（与进度条同口径）
+        left = [x for x in self.store.tasks
+                if not x.get("done")
+                and (not self._is_daily(x) or self._daily_due_today(x))]
         if not left:
             return tr("left_none")
         top = sorted(left, key=lambda x: -x.get("score", 0))[0]
@@ -5582,11 +5710,17 @@ class NoteApp(object):
           - **勾掉后仍留在日常区**（灰化 + 对勾），不像临时任务那样掉进
             底部已完成区——否则用户看不到「今天打卡了没」。
         临时任务：沿用原来的「未完成（按优先级）→ 已完成」。
-        返回 [(组名, [(索引, 任务), ...]), ...]，空组省略。"""
+        返回 [(组名, [(索引, 任务), ...]), ...]，空组省略。
+
+        v1.9.9.46：日常组只放**今天该做的**——「每周一背历史书」周三
+        不再占一行（用户实测：任务不在今天却天天显示，进度永远做不完）。
+        所有日常任务（含非今天的）集中到「日常」管理窗里查看修改。"""
         daily, tmp_undone, tmp_done = [], [], []
         for idx, t in enumerate(self.store.tasks):
             if self._is_daily(t):
-                daily.append((idx, t))
+                if self._daily_due_today(t):
+                    daily.append((idx, t))
+                # 非今天的日常不进主列表（去「日常」管理窗看）
             elif t.get("done"):
                 tmp_done.append((idx, t))
             else:
@@ -5632,7 +5766,9 @@ class NoteApp(object):
         self.store.notes = (getattr(self.store, "notes", []) or []) + [note]
         self.store.save()
         self.refresh_notes()
-        self.push_tr("bot", "note_saved")
+        # v1.9.9.46：回复带上便签内容——旧版只回「便签已贴好」，连贴两条
+        # 就是两行一模一样的字，看起来像重复了（用户实测问题 12）
+        self.push_tr("bot", "note_saved", t=text)
 
     def _del_note(self, nid):
         """删除便签（v1.9.9.45：可撤回）。
@@ -5727,7 +5863,7 @@ class NoteApp(object):
             if val and val != note.get("text"):
                 note["text"] = val
                 self.store.save()
-                self.flash(tr("note_saved"))
+                self.flash(tr("note_saved", t=val))
             try:
                 e.destroy()
             except Exception:
@@ -5788,6 +5924,11 @@ class NoteApp(object):
         total = max(len(notes), 1) * rh
         cv.config(scrollregion=(0, 0, w, max(total + 4, cv.winfo_height())))
         cv.yview_moveto(0)
+        # v1.9.9.46：便签空态也给提示 + 「记一条」按钮（与待办页一致）
+        if not notes:
+            self._draw_empty_hint(cv, w, hint=tr("empty_note_hint"))
+        self.counter_d.config(text="")
+        self.counter_d.config(text="")
         self.counter.config(text=tr("counter", left=len(notes), done=0)
                             if False else "%s %d" % (tr("tab_note"), len(notes)))
         self.draw_bar()
@@ -5836,22 +5977,27 @@ class NoteApp(object):
             cv.yview_moveto(0)
         left = sum(1 for t in self.store.tasks if not t.get("done"))
         done = len(self.store.tasks) - left
-        self.counter.config(text=self._counter_text(left, done))
+        self._set_counter(left, done)
         self.draw_bar()
         # 日历视图打开时实时跟随任务变化（增删改/勾选都会走到这）
         cal = getattr(self, "_cal_win", None)
         if cal is not None and cal.winfo_exists() and getattr(self, "_cal_cv", None):
             self._draw_calendar()
+        # v1.9.9.46：日常任务管理窗同样实时跟随
+        dmgr = getattr(self, "_dmgr_win", None)
+        if dmgr is not None and dmgr.winfo_exists():
+            self._render_daily_manager()
         self._update_bubble()
 
-    def _draw_empty_hint(self, cv, w):
-        """空列表提示 + 「记一条」按钮（v1.9.9.20）"""
+    def _draw_empty_hint(self, cv, w, hint=None):
+        """空列表提示 + 「记一条」按钮（v1.9.9.20）
+        v1.9.9.46：便签空态复用（用户实测问题 8：便签页空着什么都不显示）"""
         try:
             ch = cv.winfo_height()
             if ch < 60:                 # 首帧还没布局好，按窗口高度估
                 ch = max(120, self.root.winfo_height() - 160)
             cy = max(60, ch // 2 - 30)
-            cv.create_text(w / 2, cy, text=tr("empty_hint"),
+            cv.create_text(w / 2, cy, text=hint or tr("empty_hint"),
                            fill=C.SUB, font=self.f_small, anchor="center")
             bw, bh = 96, 26
             x0, y0 = w / 2 - bw / 2, cy + 22
@@ -5970,18 +6116,8 @@ class NoteApp(object):
         col = C_DAILY if gname == "daily" else C.SUB
         cv.create_text(8, y + h / 2, text=txt, anchor="w",
                        font=self.f_tiny, fill=col)
-        if gname == "daily":
-            # 日常组头右侧写「今日完成 x/y」——v1.9.9.32 起与底栏计数
-            # 同一套口径（_daily_counts：只数今天该做的），修掉
-            # 「底栏 0/2、组头 1/3」对不上的问题；今天不该做的
-            # （如周二的每周一三五）不计入分母
-            try:
-                _n, _dn = self._daily_counts()[:2]
-            except Exception:
-                _n, _dn = len(items or []), 0
-            if _n:
-                cv.create_text(w - 8, y + h / 2, text=tr("daily_progress", d=_dn, n=_n),
-                               anchor="e", font=self.f_tiny, fill=col)
+        # v1.9.9.46：组头右侧的「今日完成 x/y」删掉（用户实测问题 4）——
+        # 底栏已有同一口径的「日常任务 x/y」，一行里两个 0/1 重复又碍眼
         tw = self.text_width(txt, self.f_tiny) + 16
         cv.create_line(tw, y + h / 2, w - 8, y + h / 2,
                        fill=_mix(C.LINE, C.BG, 0.35))
@@ -6013,11 +6149,9 @@ class NoteApp(object):
         # （之前时间宽被算两次，标题与时间之间空出一大截）
         tx, dw, dur_txt = self._row_prefix_w(task, w)
         hhmm = task.get("hhmm")
-        # 日常任务在时间前加一个青色小标记，扫一眼就知道「这是每天的事」
-        if daily:
-            cv.create_text(11, y + rh / 2, text="●", anchor="w",
-                           font=self.f_tiny,
-                           fill=C_DAILY if not done else _mix(C_DAILY, bg, 0.55))
+        # v1.9.9.46：去掉行首的「●」小标记——它画在 x=11，时间文字从 x=15
+        # 起，字体一大「●」就压在「每天/每周一」的第一个字上（用户实测
+        # 问题 14）。日常身份靠青色竖条 + 青底 + 青色时间已经足够辨认。
         if hhmm:
             tshow = self._row_time_text(task)    # v1.9.9.43：日常显示周期文字
             cv.create_text(15, y + rh / 2, text=tshow, anchor="w",
@@ -6398,18 +6532,28 @@ class NoteApp(object):
         # （「打个卡」被当成前导空白外的任意内容）→ 一句打卡被当成查列表。
         # 改成先剥掉首尾标点空白，再整句精确匹配。
         t2 = _re.sub(r"^[\s，,]+|[\s，,。.！!～~？?]+$", "", t)
-        if _re.fullmatch(r"(?:我的|所有|全部|今天的?|当前的?)?"
-                         r"(?:任务|待办|列表|清单|todo|list)(?:列表|清单)?"
+        # v1.9.9.46：主命令词从「列表」换成「未完成」——「列表」跟界面上
+        # 的历史/清单容易混，而用户真实的话术是「我还有什么没完成」
+        if _re.fullmatch(r"(?:我的|我|所有|全部|今天的?|当前的?)?"
+                         r"(?:未完成|没做的?|没完成的?|任务|待办|列表|清单|todo|list)"
+                         r"(?:列表|清单)?"
                          r"(?:呢|吗|？|\?)?", t2, _re.I):
             return True
         return bool(_re.fullmatch(
             r"(?:今天|现在|当前)?(?:我)?(?:还)?(?:有|剩下?)"
             r"(?:什么|哪些|几个|多少)(?:任务|待办|事|活儿|没做的?|没完成的?)"
+            r"(?:没完成|没做完|没做的?|没完成的?)?"
             r"(?:呢|吗|？|\?)?", t2))
 
     def _list_report(self):
-        """播报未完成任务（按分数排序，最多 5 条）"""
-        left = [x for x in self.sorted_tasks() if not x[1].get("done")]
+        """播报未完成任务（按分数排序，最多 5 条）
+
+        v1.9.9.46：只播今天的事——非今天的日常（每周一的任务）以前
+        也被排进来，用户「明明还有 4 件没显示」。"""
+        def _today(t):
+            return not self._is_daily(t) or self._daily_due_today(t)
+        left = [x for x in self.sorted_tasks()
+                if not x[1].get("done") and _today(x[1])]
         if not left:
             return tr("left_none")
         lines = []
@@ -6839,7 +6983,7 @@ class NoteApp(object):
             win.geometry("260x220+120+120")
         win.minsize(220, 180)
         win.attributes("-topmost", True)
-        win.attributes("-alpha", min(1.0, getattr(self.store, "alpha", 0.88) + 0.02))
+        win.attributes("-alpha", min(1.0, getattr(self.store, "alpha", 0.95) + 0.02))
         self._clock_top = tk.BooleanVar(value=True)
         self._clock_widgets = []          # 主题换色用
         self._clock_fs = 0                # 已应用的时钟字号（变化才重设）
@@ -7565,7 +7709,7 @@ class NoteApp(object):
         # v1.9.9.44：不再写死 300x226——行数随任务信息变多，固定高度把
         # 底部「完成/关闭」按钮挤出窗口。改为先摆内容、按需求尺寸开窗
         win.attributes("-topmost", True)
-        win.attributes("-alpha", min(1.0, getattr(self.store, "alpha", 0.88) + 0.05))
+        win.attributes("-alpha", min(1.0, getattr(self.store, "alpha", 0.95) + 0.05))
         win.resizable(False, False)
         # 贴着主便签右侧打开，别盖住列表（位置在内容摆完后按真实宽高算）
         try:
@@ -7933,7 +8077,7 @@ class NoteApp(object):
         win.title(tr("cal_title"))
         win.configure(bg=C.BG)
         win.geometry("560x480+260+140")
-        win.attributes("-alpha", min(1.0, getattr(self.store, "alpha", 0.88) + 0.04))
+        win.attributes("-alpha", min(1.0, getattr(self.store, "alpha", 0.95) + 0.04))
         self._cal_y, self._cal_m = dt.date.today().year, dt.date.today().month
         nav = tk.Frame(win, bg=C.BG)
         nav.pack(side="top", fill="x", pady=(8, 2))
@@ -8209,6 +8353,88 @@ class NoteApp(object):
         except Exception:
             pass
 
+    # ---------------- 日常任务管理窗（v1.9.9.46，用户实测问题 5/7）
+    # 主窗口只放「今天该做的」日常，非今天的（每周一的任务）去哪看？
+    # 这里集中放全部日常任务：频率、时间、连续天数一目了然，
+    # 点任意一条进详情页改时间 / 改频率 / 删除。
+    def open_daily_manager(self):
+        win = getattr(self, "_dmgr_win", None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            self._render_daily_manager()
+            return
+        win = tk.Toplevel(self.root)
+        self._dmgr_win = win
+        win.title(tr("daily_mgr_title") + " · " + self.app_name())
+        win.configure(bg=C.BG)
+        win.geometry("430x430+240+150")
+        win.attributes("-alpha", min(1.0, getattr(self.store, "alpha", 0.95) + 0.04))
+        tk.Label(win, text=tr("daily_mgr_hint"), bg=C.BG, fg=C.SUB,
+                 font=self.f_tiny, wraplength=400, justify="left"
+                 ).pack(side="top", anchor="w", padx=10, pady=(8, 2))
+        wrap = tk.Frame(win, bg=C.BG)
+        wrap.pack(side="top", fill="both", expand=True, padx=8, pady=(0, 8))
+        self._dmgr_cv = tk.Canvas(wrap, bg=C.BG, highlightthickness=0)
+        self._dmgr_sb = ttk.Scrollbar(wrap, orient="vertical",
+                                      command=self._dmgr_cv.yview)
+        self._dmgr_sb.pack(side="right", fill="y")
+        self._dmgr_cv.pack(side="top", fill="both", expand=True)
+        self._dmgr_cv.configure(yscrollcommand=self._dmgr_sb.set)
+        self._dmgr_cv.bind("<Configure>",
+                           lambda e: self.debounce("dmgr", self._render_daily_manager, 90))
+        self._render_daily_manager()
+
+    def _render_daily_manager(self):
+        cv = getattr(self, "_dmgr_cv", None)
+        win = getattr(self, "_dmgr_win", None)
+        if cv is None or win is None or not win.winfo_exists():
+            return
+        cv.delete("all")
+        w = max(cv.winfo_width(), 300)
+        rh = max(34, self.row_height() + 10)
+        tasks = [t for t in self.store.tasks if self._is_daily(t)]
+        tasks.sort(key=lambda t: (t.get("hhmm") or "99:99"))
+        if not tasks:
+            cv.create_text(w / 2, 90, text=tr("daily_mgr_empty"),
+                           fill=C.SUB, font=self.f_small, justify="center")
+            cv.config(scrollregion=(0, 0, w, 180))
+            return
+        y = 4
+        for t in tasks:
+            tid = t["id"]
+            due_today = self._daily_due_today(t)
+            bg = _mix(C.BG, C_DAILY, 0.10 if due_today else 0.04)
+            cv.create_rectangle(0, y, w, y + rh - 4, fill=bg, outline="",
+                                tags=("dm_" + tid,))
+            cv.create_rectangle(6, y + 5, 9, y + rh - 9, fill=C_DAILY, outline="")
+            cv.create_text(16, y + (rh - 4) / 2, text=t.get("title", ""),
+                           anchor="w", font=self.f_task, fill=C.TEXT,
+                           tags=("dm_" + tid,))
+            # 右侧信息两行：频率 时间 / 连续 + 今日状态
+            freq = self._repeat_text(t.get("repeat")) or ""
+            hhmm = t.get("hhmm") or ""
+            info1 = (freq + " " + hhmm).strip()
+            streak = int(t.get("streak") or 0)
+            if t.get("done") and due_today:
+                status, s_col = tr("daily_mgr_done"), C_DAILY
+            elif due_today:
+                status, s_col = tr("daily_mgr_today_yes"), C.SUB
+            else:
+                status, s_col = tr("daily_mgr_today_no"), C.SUB
+            info2 = status + (tr("daily_mgr_days", n=streak) if streak > 1 else "")
+            cv.create_text(w - 14, y + (rh - 4) / 2 - 7, text=info1, anchor="e",
+                           font=self.f_tiny, fill=C_DAILY, tags=("dm_" + tid,))
+            cv.create_text(w - 14, y + (rh - 4) / 2 + 8, text=info2, anchor="e",
+                           font=self.f_tiny, fill=s_col, tags=("dm_" + tid,))
+            cv.tag_bind("dm_" + tid, "<Button-1>",
+                        lambda e, k=tid: self.open_task_detail(k))
+            cv.tag_bind("dm_" + tid, "<Enter>",
+                        lambda e: cv.config(cursor="hand2"))
+            cv.tag_bind("dm_" + tid, "<Leave>",
+                        lambda e: cv.config(cursor=""))
+            y += rh
+        cv.config(scrollregion=(0, 0, w, y + 4))
+
     def _cal_day_items(self, ds):
         """某天的安排：创建日/截止日命名的任务，外加重复任务
         （每天 → 天天算；每周X → 命中星期几才算）。
@@ -8260,9 +8486,10 @@ class NoteApp(object):
             # v1.9.9.35：原来只列前 3 件——4 件任务永远显示 3 件，
             # 用户以为漏了。放宽到 6 件（再多挤不下一行，以计数为准）
             for t in items[:6]:
-                # v1.9.9.40：日常任务用 ◆ 标出，与圆点颜色呼应
+                # v1.9.9.46：日常任务标「●」，与月历圆点/图例统一——
+                # 旧版这里用「◆」，同一软件两种图案，用户以为多了一种标记
                 mark = "✓" if t.get("done") else \
-                    ("◆" if t.get("repeat") else "·")
+                    ("●" if t.get("repeat") else "·")
                 parts.append("  %s %s" % (mark, t["title"]))
         else:
             parts.append(tr("cal_day_empty"))
