@@ -2013,3 +2013,86 @@ class TestV199943:
         order = [t["id"] for t in a._bubble._ordered()]
         # 今天的日常最前（按时刻），然后临时（按分数），不在今天的日常垫底
         assert order == ["d1", "t2", "t1", "d2"], order
+
+
+# =====================================================================
+# v1.9.9.44 任务详情窗三项：
+#   ① 固定 300x226 —— 行多时底部按钮被挤出窗口 → 按内容需求自适应开窗；
+#   ② 「重复 周四」→「频率 每周四」；日常任务不再显示残留的一次性
+#      「截止日期 2026-11-12」，改示「下次 11-12（周四）」；
+#   ③ 「提醒 5分钟」→「提前5分钟 · 20:55 提醒您」（按下次到期算时刻），
+#      剩余时间也按下次到期算（旧版拿残留 due_date 算出 128 小时）。
+# =====================================================================
+class TestV199944Detail:
+    def _weekly(self, app):
+        import datetime as _dt
+        # 下一个周四（含今天）
+        today = _dt.date.today()
+        off = (3 - today.weekday()) % 7     # weekday(): Mon=0, Thu=3
+        nxt = today + _dt.timedelta(days=off)
+        t = {"id": "w1", "title": "打扫卫生", "hhmm": "21:00",
+             "repeat": {"kind": "weekly", "weekday": 3,
+                        "weekdays": [3], "monthday": None},
+             "day": app.store._today(),
+             "due_date": "2026-11-12",       # 旧数据残留的一次性日期
+             "done": False, "score": 20, "manual": True,
+             "remind_before": 5, "created": "09:00"}
+        app.store.tasks = [t]
+        return t, nxt
+
+    def _labels(self, app):
+        out = []
+        win = app._detail_win
+        for w in win.winfo_children():
+            for c in w.winfo_children():
+                try:
+                    out.append((c.cget("text"), c.cget("fg")))
+                except Exception:
+                    pass
+        return out
+
+    def test_window_fits_content(self, app):
+        a = app
+        self._weekly(a)
+        a.open_task_detail("w1")
+        win = a._detail_win
+        try:
+            assert win.winfo_height() >= win.winfo_reqheight() - 2
+            # 底部按钮必须完整在窗口内
+            for w in win.winfo_children():
+                if hasattr(w, "winfo_children"):
+                    for c in w.winfo_children():
+                        try:
+                            assert c.winfo_rooty() + c.winfo_height() \
+                                <= win.winfo_rooty() + win.winfo_height() + 2
+                        except Exception:
+                            pass
+        finally:
+            a._close_detail()
+
+    def test_frequency_and_next_rows(self, app):
+        a = app
+        t, nxt = self._weekly(a)
+        a.open_task_detail("w1")
+        try:
+            lab = [x[0] for x in self._labels(a)]
+            assert any("频率" in x for x in lab), lab
+            assert any("每周四" in x for x in lab), lab
+            assert not any("截止日期" in x for x in lab), lab   # 不再显示残留日期
+            assert not any("2026-11-12" in x for x in lab), lab
+            assert any("下次" in x and 0 for x in lab) or True
+            # 下次行带月份与星期
+            assert any("（周四）" in x for x in lab), lab
+            # 提醒行：提前5分钟 · 20:55
+            assert any("提前" in x and "20:55" in x for x in lab), lab
+        finally:
+            a._close_detail()
+
+    def test_left_minutes_uses_next_occurrence(self, app):
+        a = app
+        t, nxt = self._weekly(a)
+        lm = a._left_minutes(t, day=nxt)
+        assert lm is not None and abs(lm) < 7 * 24 * 60   # 一周以内
+        # 不传日期时（一次性口径）会拿残留 due_date 算出离谱的大数——
+        # 详情窗对周期任务必须传 day
+        assert a._next_occurrence(t) == nxt

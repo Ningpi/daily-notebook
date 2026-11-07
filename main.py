@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.43"
+VERSION = "1.9.9.44"
 
 # 对话消息最多保留条数。v1.9.9.40 及以前是 60——聊天一多旧记录
 # 被三处 [-60:] 硬裁剪**永久删除**（读盘/写盘/追加各一处），用户
@@ -7149,22 +7149,19 @@ class NoteApp(object):
         self._detail_win = win
         win.title(tr("due_win_title"))
         win.configure(bg=C.BG)
-        # v1.9.7：窗口 360x300 → 300x220。旧窗口信息少时空一大片
-        win.geometry("300x226")
+        # v1.9.9.44：不再写死 300x226——行数随任务信息变多，固定高度把
+        # 底部「完成/关闭」按钮挤出窗口。改为先摆内容、按需求尺寸开窗
         win.attributes("-topmost", True)
         win.attributes("-alpha", min(1.0, getattr(self.store, "alpha", 0.88) + 0.05))
         win.resizable(False, False)
-        # 贴着主便签右侧打开，别盖住列表
+        # 贴着主便签右侧打开，别盖住列表（位置在内容摆完后按真实宽高算）
         try:
-            win.update_idletasks()
             x = self.root.winfo_x() + self.root.winfo_width() + 8
             y = self.root.winfo_y() + 30
-            sw = win.winfo_screenwidth()
-            if x + 310 > sw:
-                x = max(4, sw - 314)
-            win.geometry("300x226+%d+%d" % (x, y))
+            win._detail_pos = (x, y)
         except Exception:
-            pass
+            win._detail_pos = None
+        rep = task.get("repeat")
         tk.Label(win, text=tr("due_detail_head", t=task["title"]), bg=C.BG,
                  fg=C.TEXT, font=(self.f_ui, 11, "bold"),
                  wraplength=264, justify="left").pack(anchor="w", padx=14, pady=(12, 4))
@@ -7173,32 +7170,66 @@ class NoteApp(object):
         # v1.9.9.19：行标签从「调整优先级」改成「优先级」——原来复用
         # 右键菜单的 menu_priority，读起来像能在这里调优先级
         rows = [(tr("pri_label"), label, pcolor)]
+        # 周期任务：下次到期日（每周X任务显示「下个周四」，也是提醒时刻的基准）
+        nxt = self._next_occurrence(task) if rep else None
         if task.get("hhmm"):
             rows.append((tr("due_at", d=""), task["hhmm"], None))
-            # 剩余时间：今天的任务给出「还有多久」，已过给出提示（v1.9.7）
-            left_min = self._left_minutes(task)
+            # 剩余时间：一次性任务看 due_date/今天（v1.9.7）；周期任务
+            # 看**下次到期**——旧版拿残留的一次性 due_date 算出
+            # 「还有 128 小时」，完全不对
+            if rep:
+                left_min = self._left_minutes(task, day=nxt) if nxt else None
+            else:
+                left_min = self._left_minutes(task)
             if left_min is not None:
                 if left_min >= 0:
                     h6, m6 = divmod(left_min, 60)
-                    left_txt = (tr("detail_left_hm") % (h6, m6)) if h6 \
-                        else (tr("detail_left_m") % m6)
+                    if h6 >= 24:
+                        # v1.9.9.44：超过一天的剩余别再拿「146 小时」糊脸
+                        d6, h6 = divmod(h6, 24)
+                        left_txt = tr("detail_left_dm") % (d6, h6)
+                    else:
+                        left_txt = (tr("detail_left_hm") % (h6, m6)) if h6 \
+                            else (tr("detail_left_m") % m6)
                 else:
                     left_txt = tr("detail_left_over")
                 rows.append((tr("detail_left"), left_txt,
                              None if left_min >= 0 else "#B4463C"))
-        if task.get("due_date"):
+        if rep:
+            # v1.9.9.44：日常任务没有截止日期——旧数据里残留的一次性
+            # due_date（如 2026-11-12）不再显示，改示「下次」到期日
+            if nxt is not None and nxt != dt.date.today():
+                wnames = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+                rows.append((tr("detail_next"),
+                             "%d-%d（%s）" % (nxt.month, nxt.day,
+                                              wnames[nxt.weekday()]), None))
+        elif task.get("due_date"):
             rows.append((tr("detail_due_date"), task["due_date"], None))
         if task.get("remind_at"):
             rows.append((tr("detail_remind"), task["remind_at"], None))
         elif task.get("remind_before"):
-            rows.append((tr("detail_remind"), tr("remind_%d" % task["remind_before"])
-                         if task["remind_before"] in (5, 15, 30, 60)
-                         else "%d %s" % (task["remind_before"], tr("clock_min")), None))
+            _m = task["remind_before"]
+            _mtxt = tr("remind_%d" % _m) if _m in (5, 15, 30, 60) \
+                else "%d %s" % (_m, tr("clock_min"))
+            # v1.9.9.44：「5分钟」没头没尾——说清「提前5分钟」，带钟点的
+            # 算出实际提醒时刻：「提前5分钟 · 20:55 提醒您」
+            if task.get("hhmm"):
+                try:
+                    _h, _mi = [int(x) for x in task["hhmm"].split(":")]
+                    _rt = (dt.datetime(2000, 1, 1, _h, _mi)
+                           - dt.timedelta(minutes=_m))
+                    rows.append((tr("detail_remind"),
+                                 tr("detail_remind_plan",
+                                    m=_mtxt, t=_rt.strftime("%H:%M")), None))
+                except Exception:
+                    rows.append((tr("detail_remind"), _mtxt, None))
+            else:
+                rows.append((tr("detail_remind"), _mtxt, None))
         if task.get("dur"):
             rows.append((tr("detail_spent"), task["dur"], None))
-        if task.get("repeat"):
+        if rep:
             rows.append((tr("detail_repeat"),
-                         self._repeat_text(task["repeat"]), None))
+                         self._repeat_text(rep), None))
         if task.get("done"):
             rows.append((tr("detail_done"), task.get("done_at") or "", None))
         for k, v, vc in rows:
@@ -7216,16 +7247,43 @@ class NoteApp(object):
                                                 self._close_detail())).pack(side="left")
         tk.Button(bf, text=tr("due_ignore"), bg=C.ROW2, fg=C.TEXT, relief="flat",
                   padx=10, command=self._close_detail).pack(side="right")
+        # 内容摆完 → 按需求尺寸开窗（行再多按钮也不会被挤出去）
+        win.update_idletasks()
+        _w = max(win.winfo_reqwidth(), 280)
+        _h = win.winfo_reqheight()
+        _pos = getattr(win, "_detail_pos", None)
+        _x, _y = _pos if _pos else (60, 60)
+        _sw = win.winfo_screenwidth()
+        if _x + _w + 8 > _sw:
+            _x = max(4, _sw - _w - 8)
+        win.geometry("%dx%d+%d+%d" % (_w, _h, _x, _y))
 
-    def _left_minutes(self, task):
-        """距截止还有多少分钟；无法判断返回 None，已过返回负数"""
+    def _next_occurrence(self, task, start=None):
+        """周期任务的下一次到期日（从今天起往后找）；找不到返回 None。
+
+        每周X任务的「下次」、剩余时间、提前提醒时刻都以它为基准，
+        不再依赖旧数据残留的一次性 due_date。"""
+        d0 = start or dt.date.today()
+        for _i in range(367):
+            _d = d0 + dt.timedelta(days=_i)
+            try:
+                if self._daily_due_today(task, _d):
+                    return _d
+            except Exception:
+                return None
+        return None
+
+    def _left_minutes(self, task, day=None):
+        """距截止还有多少分钟；无法判断返回 None，已过返回负数。
+
+        v1.9.9.44：周期任务传入下次到期日 day，按那一天算剩余。"""
         hhmm = task.get("hhmm")
         if not hhmm:
             return None
         try:
             h, mi = [int(x) for x in hhmm.split(":")]
-            dd = task.get("due_date") or self.store._today()
-            y, mo, d = [int(x) for x in dd.split("-")]
+            dd = day or task.get("due_date") or self.store._today()
+            y, mo, d = [int(x) for x in str(dd).split("-")]
             due = dt.datetime(y, mo, d, h, mi)
             return int((due - dt.datetime.now()).total_seconds() // 60)
         except Exception:

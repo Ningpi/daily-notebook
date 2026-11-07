@@ -223,6 +223,7 @@ STRINGS = {
     # 任务详情窗（v1.9.7）
     "detail_left": ("剩余时间", "Time left"),
     "detail_left_hm": ("还有 %d 小时 %d 分钟", "%dh %dm left"),
+    "detail_left_dm": ("还有 %d 天 %d 小时", "%dd %dh left"),
     "detail_left_m": ("还有 %d 分钟", "%d min left"),
     "detail_left_over": ("已过截止时间", "Overdue"),
     "rep_daily": ("每天", "daily"),
@@ -468,7 +469,12 @@ STRINGS = {
     "detail_due_date": ("截止日期", "Due date"),
     "detail_remind": ("提醒", "Remind"),
     "detail_spent": ("用时", "Spent"),
-    "detail_repeat": ("重复", "Repeat"),
+    # v1.9.9.44：「重复」改叫「频率」，值已是「每周四」式描述
+    "detail_repeat": ("频率", "Frequency"),
+    # 日常任务的「下次到期」替代一次性截止日期
+    "detail_next": ("下次", "Next"),
+    # 提醒行说清「提前多久 + 实际提醒时刻」
+    "detail_remind_plan": ("提前{m} · {t} 提醒您", "{m} early · at {t}"),
     "detail_done": ("完成于", "Done at"),
 
     # —— 未完成任务气泡（屏幕右下角）
