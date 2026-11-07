@@ -1940,3 +1940,76 @@ class TestV199942:
         a.respond("买牛奶")
         assert any(t["title"] == "买牛奶" for t in a.store.tasks), \
             [(t["title"], t.get("hhmm")) for t in a.store.tasks]
+
+
+# =====================================================================
+# v1.9.9.43 两项：
+#   ① 「打扫卫生，每周四晚上九点」建出来的日常任务带一次性 due_date
+#      （下一个周四），行首显示「11/12 21:00」像临时任务，计数却不算
+#      今天 →「明明两个日常却是 0/1」。现在：周期任务不带一次性日期，
+#      行首显示「每周四 21:00」；不在今天的日常打卡会提示而非打卡。
+#   ② 气泡顺序与主列表同构：今天的日常在前（按时刻），临时任务在后
+#      （按优先级），不在今天的日常垫底——不再被分数插成两截。
+# =====================================================================
+class TestV199943:
+    def test_weekly_task_no_stale_due_date(self, app):
+        a = app
+        a.store.tasks = []
+        a.respond("打扫卫生 每周四晚上九点")
+        t = [x for x in a.store.tasks if x["title"] == "打扫卫生"][0]
+        assert t.get("repeat") and t["repeat"].get("kind") == "weekly"
+        assert not t.get("due_date"), t.get("due_date")   # 不再残留 11/12
+        # 行首时间位显示周期文字
+        assert a._row_time_text(t) == "每周四 21:00"
+        # 计数：不在今天 → 不进今天的日常分母
+        n, dn = a._daily_counts()[:2]
+        assert (n, dn) == (0, 0)
+
+    def test_toggle_not_today_daily_hints(self, app):
+        import datetime as _dt
+        a = app
+        tomorrow_wd = (_dt.date.today().weekday() + 1) % 7   # 明天的星期几
+        t = {"id": "w1", "title": "打扫卫生", "hhmm": "21:00",
+             "repeat": {"kind": "weekly", "weekday": tomorrow_wd,
+                        "weekdays": [tomorrow_wd], "monthday": None},
+             "day": a.store._today(), "due_date": None, "done": False,
+             "score": 45, "manual": True, "created": "09:00"}
+        a.store.tasks = [t]
+        a.toggle_done("w1")
+        assert not t["done"]                    # 没被打卡
+        assert "打卡" in a.f_hint.cget("text")  # 提示了「到那天再打卡」
+
+    def test_row_time_text_daily(self, app):
+        a = app
+        tdaily = {"repeat": {"kind": "daily", "weekday": None,
+                             "monthday": None}, "hhmm": "08:30"}
+        assert a._row_time_text(tdaily) == "每天 08:30"
+        tnodur = {"repeat": {"kind": "daily", "weekday": None,
+                             "monthday": None}, "hhmm": None}
+        assert a._row_time_text(tnodur) == "每天"
+
+    def test_bubble_order_daily_first(self, app):
+        import datetime as _dt
+        a = app
+        tomorrow_wd = (_dt.date.today().weekday() + 1) % 7
+        a.store.tasks = [
+            {"id": "t1", "title": "低分临时", "hhmm": None, "repeat": None,
+             "day": a.store._today(), "due_date": None, "done": False,
+             "score": 20, "manual": True, "created": "09:00"},
+            {"id": "d1", "title": "今天的日常", "hhmm": "09:00",
+             "repeat": {"kind": "daily", "weekday": None, "monthday": None},
+             "day": a.store._today(), "due_date": None, "done": False,
+             "score": 20, "manual": False, "created": "09:00"},
+            {"id": "t2", "title": "高分临时", "hhmm": "18:00", "repeat": None,
+             "day": a.store._today(), "due_date": None, "done": False,
+             "score": 95, "manual": True, "created": "09:00"},
+            {"id": "d2", "title": "每周X的日常", "hhmm": "10:00",
+             "repeat": {"kind": "weekly", "weekday": tomorrow_wd,
+                        "weekdays": [tomorrow_wd], "monthday": None},
+             "day": a.store._today(), "due_date": None, "done": False,
+             "score": 95, "manual": False, "created": "09:00"},
+        ]
+        a._ensure_bubble()          # 气泡正常启动 600ms 后才建，测试里直接建
+        order = [t["id"] for t in a._bubble._ordered()]
+        # 今天的日常最前（按时刻），然后临时（按分数），不在今天的日常垫底
+        assert order == ["d1", "t2", "t1", "d2"], order

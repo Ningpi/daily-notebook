@@ -1439,7 +1439,13 @@ def parse_tasks(text, fallback=True):
                 results[prev] = (t0, h0 or hhmm,
                                  score_task(t0, raw_new, h0 or hhmm, passed, offset),
                                  raw_new, d0 or dur,
-                                 prev_t[5] if len(prev_t) > 5 else None,
+                                 # v1.9.9.43：噪音段里的周期词不能丢——
+                                 # 「打扫卫生 每周四晚上九点」分句后「每周四
+                                 # 晚上九点」被清洗成空标题走这里，旧代码只
+                                 # 并日期不并 repeat，任务成了「一次性 11/12」
+                                 # 而不是「每周四」的日常
+                                 (prev_t[5] if len(prev_t) > 5 else None)
+                                 or find_repeat(seg),
                                  seg_due or prev_due)
             continue
         title = title[:24]

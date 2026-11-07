@@ -116,6 +116,9 @@ STRINGS = {
                      "Is \"{t}\" in the morning or the afternoon? Reply \"am\" or \"pm\"."),
     "meridiem_ok": ("好的，按{p}的「{t}」记下了。", "Got it — {p} for \"{t}\"."),
     "meridiem_skip": ("好的，这条就不记了。", "Okay, skipped."),
+    # v1.9.9.43：不在今天到期的日常打卡提示
+    "daily_not_today": ("【{t}】是{r}的任务，到那天再打卡吧，今天打卡不会计入完成度。",
+                        "\"{t}\" is due {r}. Check it off on that day instead."),
     # v1.9.9.40：日历圆点图例
     "cal_legend_daily": ("日常", "Daily"),
     "cal_legend_temp": ("待办", "One-off"),

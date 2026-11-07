@@ -26,7 +26,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.42"
+VERSION = "1.9.9.43"
 
 # 对话消息最多保留条数。v1.9.9.40 及以前是 60——聊天一多旧记录
 # 被三处 [-60:] 硬裁剪**永久删除**（读盘/写盘/追加各一处），用户
@@ -860,25 +860,38 @@ class Bubble(object):
         return [t for t in self.app.store.tasks if not t.get("done")]
 
     def _ordered(self):
-        """气泡展开顺序（v1.9.9）：紧急度优先，同优先级里截止早的在前。
+        """气泡展开顺序（v1.9.9.43：与主列表同构——今天的日常在最上）
 
-        与主列表的差异：主列表只看时刻（hhmm），气泡是「扫一眼就知道
-        先干什么」的提醒工具，所以同分时把带日期且更早到期的排前面；
-        完全没有截止信息的压到最后。
-        """
+        旧版把所有任务混在一起按「优先级→截止→时刻」排，日常任务被分数
+        插进临时任务中间、上下一分为二，用户看不出规律。现在：
+        ① 今天的日常（按时刻）→ ② 临时任务（按 优先级→截止→时刻，
+        沿用 v1.9.9 规则）→ ③ 不在今天到期的日常（刚建的每周X任务，
+        按创建顺序）。与主列表「日常组在前、临时在后」的心智一致。"""
         today = self.app.store._today()
 
         def _key(it):
             i, t = it
+            if self.app._is_daily(t):
+                if self.app._daily_due_today(t):
+                    return (0, t.get("hhmm") or "99:99", i)   # 今天的日常：按时刻
+                return (2, t.get("hhmm") or "99:99", i)       # 不在今天：垫底
             has_dl = bool(t.get("hhmm") or t.get("due_date"))
             dd = t.get("due_date") or (today if t.get("hhmm") else "9999")
-            return (-t.get("score", 0), 0 if has_dl else 1,
-                    dd, t.get("hhmm") or "99:99", i)
+            return (1, -t.get("score", 0), 0 if has_dl else 1,
+                    dd, t.get("hhmm") or "99:99", i)          # 临时：按紧急度
 
         return [t for _, t in sorted(enumerate(self._undone()), key=_key)]
 
     def _dl_text(self, t):
-        """任务条右侧的截止小字：「M/D HH:MM」；只有日期给「M/D」"""
+        """任务条右侧的截止小字（v1.9.9.43：与主列表行首同口径）——
+        日常任务显示「每周四 21:00」周期文字，临时任务「M/D HH:MM」"""
+        try:
+            if self.app._is_daily(t):
+                rt = self.app._row_time_text(t)
+                if rt:
+                    return rt
+        except Exception:
+            pass
         hhmm = t.get("hhmm")
         if hhmm:
             try:
@@ -4742,6 +4755,10 @@ class NoteApp(object):
     def _finish_task(self, task):
         """把一个任务标记完成（日常任务走打卡），返回回复"""
         if self._is_daily(task):
+            # v1.9.9.43：不在今天到期的日常不打卡（与勾选框同一条规则）
+            if not self._daily_due_today(task) and not task.get("done"):
+                return tr("daily_not_today", t=task["title"],
+                          r=self._repeat_text(task.get("repeat")))
             # 日常任务：勾的是「今天打卡」，不是「这件事完了」
             self._daily_toggle(task)
             self.store.save()
@@ -5101,7 +5118,8 @@ class NoteApp(object):
                         "created": dt.datetime.now().strftime("%H:%M"),
                         "day": self.store._today(),
                         "repeat": item[5] if len(item) > 5 else None,
-                        "due_date": due_iso,
+                        # v1.9.9.43：同下——周期任务不带一次性 due_date
+                        "due_date": None if _rep else due_iso,
                         "_from_raw": bool(hhmm),
                     },
                 }
@@ -5125,11 +5143,19 @@ class NoteApp(object):
                 "created": dt.datetime.now().strftime("%H:%M"),
                 "day": self.store._today(),
                 "repeat": item[5] if len(item) > 5 else None,
-                "due_date": item[6].isoformat() if (len(item) > 6 and item[6]) else None,
+                # v1.9.9.43：周期任务不带一次性截止日期——「打扫卫生，每周四
+                # 晚上九点」旧版会把下一个周四（11/12）一并写成 due_date，
+                # 行首显示成「11/12 21:00」，看起来像临时任务，计数却不算
+                # 今天（它是每周四的活）→「两个日常 0/1」。日常的下次到期
+                # 由 repeat 自己表达，行首显示「每周四 21:00」。
+                "due_date": None if (len(item) > 5 and item[5]) else
+                            (item[6].isoformat() if (len(item) > 6 and item[6]) else None),
                 "_from_raw": bool(hhmm),   # 时间来自原句，回复里不必复述
             })
             # 截止日期：原文里的 明天/后天 → 记下具体日期（日历用）
-            if not self.store.tasks[-1].get("due_date"):
+            # v1.9.9.43：周期任务不吃这套（它没有「某一天」的概念）
+            if not self.store.tasks[-1].get("due_date") \
+                    and not self.store.tasks[-1].get("repeat"):
                 if "明天" in (raw_seg or ""):
                     self.store.tasks[-1]["due_date"] = (
                         dt.date.today() + dt.timedelta(days=1)).isoformat()
@@ -5497,7 +5523,7 @@ class NoteApp(object):
         tx = 15
         hhmm = t.get("hhmm")
         if hhmm:
-            tshow = self._tshow(t, hhmm)
+            tshow = self._row_time_text(t)       # v1.9.9.43：与绘制同口径
             # 间隔 10px ≈ 一个半角字符宽（v1.9.9.3：用户反馈时间与标题之间
             # 空太多——draw_row 曾把这个宽度又加了一遍，间隔翻倍）
             tx += self.text_width(tshow, self.f_small) + 10
@@ -5511,6 +5537,21 @@ class NoteApp(object):
             dur_txt = self.ellipsize(dur_txt, self.f_tiny, 88)
             dw = 88
         return tx, dw, dur_txt
+
+    def _row_time_text(self, t):
+        """任务行时间位的显示文本（draw_row / _row_prefix_w / 气泡共用）
+
+        v1.9.9.43：日常任务显示「每周四 21:00」式周期文字。旧版把一次性
+        due_date（建「每周四晚上九点」时顺手记下的下一个周四 11/12）拼在
+        前面，行首显示「11/12 21:00」，看起来像临时任务、计数却不算今天，
+        用户困惑「明明两个日常为什么 0/1」。"""
+        if self._is_daily(t):
+            rt = self._repeat_text(t.get("repeat"))
+            if rt:
+                hhmm = t.get("hhmm")
+                return (rt + " " + hhmm) if hhmm else rt
+        hhmm = t.get("hhmm")
+        return self._tshow(t, hhmm) if hhmm else ""
 
     def _tshow(self, t, hhmm):
         """时间列显示文本：非今天的任务在时间前带日期（v1.9.5）"""
@@ -5584,7 +5625,7 @@ class NoteApp(object):
                            font=self.f_tiny,
                            fill=C_DAILY if not done else _mix(C_DAILY, bg, 0.55))
         if hhmm:
-            tshow = self._tshow(task, hhmm)
+            tshow = self._row_time_text(task)    # v1.9.9.43：日常显示周期文字
             cv.create_text(15, y + rh / 2, text=tshow, anchor="w",
                            font=self.f_small,
                            fill=(_mix(C_DAILY, bg, 0.35) if (done and daily)
@@ -5780,6 +5821,13 @@ class NoteApp(object):
         changed = False
         for t in self.store.tasks:
             if t["id"] == tid:
+                # v1.9.9.43：不在今天到期的日常（如每周四的任务在周五）
+                # 不能打卡——打卡了计数也不动，用户会困惑「打了卡怎么还是 0」
+                if self._is_daily(t) and not self._daily_due_today(t) \
+                        and not t.get("done"):
+                    self.flash(tr("daily_not_today",
+                                  t=t["title"], r=self._repeat_text(t.get("repeat"))))
+                    return
                 # v1.9.9.22：勾选/取消勾选也可撤回
                 self._push_undo({"kind": "done", "id": tid,
                                  "prev": bool(t.get("done")),
@@ -7193,8 +7241,10 @@ class NoteApp(object):
             return tr("rep_daily") if zh else "Every day"
         if kind == "weekly":
             if wd is not None and 0 <= int(wd) < 7:
-                return names[int(wd)] if zh else "Every " + ["Mon", "Tue", "Wed",
-                        "Thu", "Fri", "Sat", "Sun"][int(wd)]
+                # v1.9.9.43：「每周四」比「周四」更像日常任务的周期描述
+                return ("每周" + "一二三四五六日"[int(wd)]) if zh else \
+                    "Every " + ["Mon", "Tue", "Wed",
+                                "Thu", "Fri", "Sat", "Sun"][int(wd)]
             return tr("rep_weekly") if zh else "Every week"
         if kind == "monthly":
             return tr("rep_monthly") if zh else "Every month"
