@@ -1233,12 +1233,16 @@ class TestV199925CoreTrust:
                 "%s → %s（期望 %s）" % (word, a.store.tasks[0]["score"], letter)
 
     def test_pending_reply_word_does_not_create_task(self, app):
-        """追问中回「确认/好的/算了」不再被建成任务（P0-3）"""
+        """追问中回「确认/好的/算了」不再被建成任务（P0-3）
+
+        v1.9.9.51：现在「昨天…」能被识别成过期任务，会先追问「要加入吗」，
+        回答「确认」后**任务本身**被加入是正确行为；要守的是「确认」这两个
+        字不能变成任务名。原断言拿任务总数比较，碰上这条新路径就误报。"""
         a = self._fresh(app)
         a.respond("昨天要交的作业")
-        n = len(a.store.tasks)
         a.respond("确认")
-        assert len(a.store.tasks) == n, "「确认」被建成任务了"
+        assert all(t["title"].strip() != "确认" for t in a.store.tasks), \
+            "「确认」被建成任务了"
         assert all("确认" not in t["title"] for t in a.store.tasks)
 
     def test_pending_state_cleared_after_confirm(self, app):
@@ -1320,11 +1324,12 @@ class TestV199925CoreTrust:
         assert a.store.tasks[0].get("hhmm") == "16:00", a.store.tasks[0]
 
     def test_compound_one_task(self, app):
-        """「写周报，周五前交」是一条任务+截止时间"""
+        """「写周报，周五前交」是一条任务+截止日期"""
         import parser as core
         ts = core.parse_tasks("写周报，周五前交")
         assert len(ts) == 1, [t[0] for t in ts]
-        assert ts[0][1], "截止时间没带上"
+        # v1.9.9.51：截止只落日期（第 7 位），不再凭空造 18:00 钟点
+        assert ts[0][6] is not None, "截止日期没带上"
 
     def test_weather_and_state_chat(self, app):
         """天气提问 / 说状态不建任务"""

@@ -479,9 +479,14 @@ class TestV19919QA:
             assert r and r[0][1] == want, (s, r)
 
     def test_weekday_no_period_still_18(self):
-        """只有星期没有时段 → 仍兜底 18:00"""
+        """只有星期没有时段 → 只记日期，不再凭空造 18:00
+
+        v1.9.9.51 行为变更：旧版「周六去银行」会被塞一个晚上 6 点的
+        提醒时刻，用户没说时间却被追问提醒（实测反馈「为什么直接
+        确定是晚上 6 点」）。现在 hhmm 留空，日期照常解析。"""
         r = core.parse_tasks("周六去银行")
-        assert r and r[0][1] == "18:00", r
+        assert r and r[0][1] is None, r
+        assert r[0][6] is not None, "日期没解析出来"
 
     def test_verb_kept_in_title(self):
         """「去银行」「去超市买牛奶」标题保留动词"""

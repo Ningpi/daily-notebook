@@ -143,6 +143,24 @@ STRINGS = {
                             "Data file damaged; original kept as {p}"),
     "hist_corrupt_banner": ("历史记录损坏，原件已保留副本（点右侧打开文件夹）",
                             "History damaged; a copy was kept"),
+    # ---- v1.9.9.51 不可关闭横幅 / 一键从备份恢复 / 超长输入
+    "load_corrupt_banner_backup": (
+        "数据文件损坏（原件已保留）。{d} 的备份有 {n} 条任务",
+        "Data file damaged (original kept). Snapshot {d} has {n} task(s)"),
+    "hist_corrupt_banner_backup": (
+        "历史记录损坏（原件已保留）。{d} 的备份有 {n} 天记录",
+        "History damaged (original kept). Snapshot {d} has {n} day(s)"),
+    "banner_restore_now": ("从备份恢复", "Restore"),
+    "banner_sticky_hint": ("这条提示关了会漏掉数据风险，先处理掉它吧",
+                           "Please deal with this first — it warns about data loss"),
+    "restore_none": ("没有可用备份", "No snapshot available"),
+    "text_too_long": ("内容 {n} 字，超过 {mx} 字上限，请分几条发",
+                      "{n} chars — over the {mx} limit, please split it"),
+    "text_too_long_chat": (
+        "这条有 {n} 字，超过单条 {mx} 字的上限。我一次只能可靠处理这么多——"
+        "请拆成几条发（比如一条一个任务），不要让我把后面的内容悄悄丢掉。",
+        "That's {n} characters, over the {mx} per-message limit. Please split "
+        "it into a few messages instead of letting part of it get dropped."),
     "restore_backup": ("从备份恢复（按日期）", "Restore from snapshot"),
     "restore_hint": ("下面是每天自动留的快照（默认留 7 天）。选中一天，再点"
                      "「恢复任务」或「恢复历史」。恢复前会把当前文件另存一份。",

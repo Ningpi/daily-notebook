@@ -165,9 +165,10 @@ class TestDailyDefaults:
         assert r[0][1] == "21:00"
 
     def test_nontask_weekday_keeps_fallback(self):
-        # 非周期任务（周五之前交周报）保留 18:00 兜底不变
+        # v1.9.9.51：非周期任务也不再兜底 18:00——只有日期，没有钟点
         r = PC.parse_tasks("周五之前交周报")
-        assert r[0][1] == "18:00"
+        assert r[0][1] is None
+        assert r[0][6] is not None
 
     def test_daily_task_no_dl_question(self, app):
         t = _daily(app, "背单词", weekday=0)

@@ -61,7 +61,10 @@ PERIOD_HINTS = {"上午": 9, "早上": 8, "早晨": 8, "中午": 12, "下午": 1
                 "夜里": 22, "凌晨": 2,
                 "下班前": 18, "上班前": 9, "午饭前": 12, "睡觉前": 22}
 
-DAY_WORDS = ["今天", "今日", "明天", "明日", "后天", "今儿", "明儿"]
+DAY_WORDS = ["今天", "今日", "明天", "明日", "后天", "今儿", "明儿",
+             # v1.9.9.51：过去日期（补记/过期任务）也要认，否则标题里
+             # 留「昨天」、或「前天」被 ^前 兜底啃成「天」
+             "昨天", "昨日", "昨儿", "前天", "大前天", "大后天"]
 PER_WORDS = ["上午", "下午", "中午", "早上", "早晨", "晚上", "今晚", "明晚", "傍晚",
              "夜里", "凌晨", "下班前", "上班前", "午饭前", "睡觉前"]
 CLOCK_UNITS = ["点", "時", "时"]
@@ -337,8 +340,13 @@ def find_deadline_date(text):
             except ValueError:
                 pass
     # 1) 相对天
-    for w, off in (("大后天", 3), ("后天", 2), ("明天", 1), ("明日", 1), ("明儿", 1),
-                   ("今天", 0), ("今日", 0), ("今儿", 0)):
+    # v1.9.9.51：补「昨天/前天/大前天」。旧版完全不认，日期丢失，
+    # 而 clean_title 的「^前/^昨」兜底还会把「前天开会」啃成「天开会」
+    # （用户实测）。大词放前面，避免「后天」抢走「大后天」。
+    for w, off in (("大后天", 3), ("大前天", -3), ("后天", 2), ("前天", -2),
+                   ("明天", 1), ("明日", 1), ("明儿", 1),
+                   ("今天", 0), ("今日", 0), ("今儿", 0),
+                   ("昨天", -1), ("昨日", -1), ("昨儿", -1)):
         if _has_word(text, w):
             return today + dt.timedelta(days=off), w
     # 2) 星期
@@ -472,8 +480,11 @@ def find_times(text):
     # 钟点就该没有 hhmm，到点机制由 repeat 本身管。
     if find_repeat(text):
         wdelta, wraw = None, None
-    if wdelta is not None and not has_clock and not _has_period:
-        out.append(("18:00", (18, 0), 0, wraw))
+    # v1.9.9.51：**单个星期几也不再兜底 18:00**。「周三开会」「周五交报告」
+    # 走的是 due_date 分支而不是 repeat，旧版同样会凭空多出「晚上 6 点」
+    # 并追问提醒——和用户反馈的「为什么直接确定是晚上 6 点」是同一个毛病。
+    # 只记日期就够了，具体几点由用户自己说。（wdelta 仍供
+    # find_deadline_date 算日期，只是不再拿它造钟点。）
 
     if not out:
         return []
@@ -489,14 +500,20 @@ def find_times(text):
 
     now = dt.datetime.now()
     result = []
-    day_offset = 1 if (_has_word(text, "明天") or _has_word(text, "明日") or _has_word(text, "明儿")) else (
-        2 if _has_word(text, "后天") else 0)
-    if day_offset == 0 and _has_word(text, "大后天"):
-        day_offset = 3
+    # v1.9.9.51：改为查表，并把「昨天/前天」算成负数偏移——负偏移同样
+    # 代表「这个钟点已经过去了」，passed 判定要一起认，否则「昨天下午3点
+    # 开会」会被当成今天 15:00 的未来时间。
+    day_offset = 0
+    for _w, _o in (("大后天", 3), ("大前天", -3), ("后天", 2), ("前天", -2),
+                   ("明天", 1), ("明日", 1), ("明儿", 1),
+                   ("昨天", -1), ("昨日", -1), ("昨儿", -1)):
+        if _has_word(text, _w):
+            day_offset = _o
+            break
     if day_offset == 0 and wdelta is not None:
         day_offset = wdelta
     for hhmm, (h, mi), pos, raw in dedup:
-        passed = day_offset > 0 or (h * 60 + mi) < (now.hour * 60 + now.minute)
+        passed = day_offset != 0 or (h * 60 + mi) < (now.hour * 60 + now.minute)
         result.append((hhmm, passed, raw, day_offset))
     return result
 
@@ -655,6 +672,13 @@ MID_NOISE = ["麻烦你", "麻烦", "请帮我", "帮我一下", "谢谢你", "�
 
 def clean_title(text, hits=()):
     t = text or ""
+    # v1.9.9.51：句尾单字母 A/B/C/D 是用户手写的优先级代号（score_task
+    # 据此定档），标题里不该再留「交房租A」。只在没有其他拉丁词时剥，
+    # 「买 HDMI 线 A」这类不动。
+    if not re.findall(r"[A-Za-z]{2,}", t):
+        _st = t.strip()
+        if len(_st) >= 3 and re.search(r"(?:\s|[\u4e00-\u9fff])[ABCD]$", _st):
+            t = _st[:-1].strip()
     # v1.9.9.19：「9:00-11:00开会」的区间里两个时间 hit 被分别切掉后，
     # 残留「-」和半截数字（→「00-11开会」）。先把「时间-连接-时间」
     # 整段剥掉，四种连接符（- / ~ / 到 / 至）都覆盖。
@@ -749,6 +773,12 @@ def clean_title(text, hits=()):
                 changed = True
         for w in TAIL_FILLERS:
             if t.endswith(w):
+                # v1.9.9.51：「交上去 / 拿回去 / 送过来」里句尾的「去」是
+                # 方位补语，删掉就成「交上」这种半截话（用户实测
+                # 「把方案交上去」→「把方案交上」）。只有前一字符不是方位
+                # 字时才当语气填充词删（「我去买菜去」）。
+                if w == "去" and len(t) >= 2 and t[-2] in "上下回进出过起":
+                    continue
                 t = t[:-len(w)]
                 changed = True
         for w in TRAIL_WORDS:
@@ -762,9 +792,22 @@ def clean_title(text, hits=()):
     t = _remove_words(t, MID_NOISE)
     # 「把水电费交了」→「交水电费」：介词结构里结果补语跑到了句尾
     # （「了」被当语气词删掉后只剩「把X交」这种病句）
-    m_ba = re.match(r"^[把将](.+?)([交办买做发写读看念拿还送打洗整理准备完成弄修换])$", t)
+    # v1.9.9.51：旧规则把句尾任何动词字都往前挪，于是
+    #   「把报告写完」→「完报告写」、「把衣服洗完」→「完衣服洗」，
+    #   「把作业做完」→「完作业做」——「完/好/掉」是**结果补语**，
+    #   挪到句首直接变病句（用户实测截图）。按补语/谓语分两类处理：
+    #   把X完/好/掉  ->  X完/好/掉（去掉「把」，语序不动）
+    #   把Y交/买/写  ->  交Y 买Y（谓语本身在句尾，前移）
+    _VERB_CHARS = "交办买做发写读看念拿还送打洗整理准备完成弄修换倒扔擦扫晒关寄存传"
+    _COMP_CHARS = "完好掉成光齐清"
+    m_ba = re.match(r"^[把将](.+?)([%s])$" % _VERB_CHARS, t)
     if m_ba and len(m_ba.group(1)) >= 2:
-        t = m_ba.group(2) + m_ba.group(1)
+        _v, _rest = m_ba.group(2), m_ba.group(1)
+        t = (_rest + _v) if _v in _COMP_CHARS else (_v + _rest)
+    elif re.match(r"^[把将]\s*\S{2,}$", t):
+        # 「把方案交上去 / 把垃圾倒了 / 把房间打扫干净」：句子本来通顺，
+        # 去掉「把」即可（「方案交上去」比「交方案上去」自然）
+        t = re.sub(r"^[把将]\s*", "", t)
     # 句首残留的「我 / 我的」：只在后面还有实词时才删
     # （「我护照放在…」→「护照放在…」，但单独的「我」不动）
     t = re.sub(r"^我的(?=.{2,})", "", t)
@@ -894,6 +937,15 @@ def score_task(title, raw, hhmm, passed=False, day_offset=0):
             s += 9
         else:
             s += 4
+    # v1.9.9.51：句尾单字母 A/B/C/D 是用户手写的优先级代号（A 最急）。
+    # 旧版完全不理它，标题里还留着「交房租A」（用户实测）。只在「空格 +
+    # 单个大写字母」或「中文紧跟单个大写字母」时认，且要求原文没有别的
+    # 拉丁词——否则「买 HDMI 线 A」这种会被误伤。
+    _m_pri = re.search(r"(?:^|[\s\u4e00-\u9fff])([ABCD])$", (raw or "").strip())
+    if _m_pri:
+        _latin = re.findall(r"[A-Za-z]{2,}", raw or "")
+        if not _latin:
+            s = {"A": 95.0, "B": 70.0, "C": 45.0, "D": 20.0}[_m_pri.group(1)]
     return max(0, min(100, round(s)))
 
 

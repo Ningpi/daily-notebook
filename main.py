@@ -27,7 +27,14 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.50"
+VERSION = "1.9.9.51"
+
+# 单条输入的长度上限（v1.9.9.51）
+# 用户实测贴长文会「少了一大截」甚至卡住，而程序既不提示也不报错。
+# 与其静默截断，不如在入口明确拒绝并让用户拆开——数据宁可让用户
+# 自己分段，也不能悄悄吞掉。2000 字足够放下一条任务或一整段便签
+# （普通周报 800~1200 字）。
+MAX_INPUT = 2000
 
 # 对话消息最多保留条数。v1.9.9.40 及以前是 60——聊天一多旧记录
 # 被三处 [-60:] 硬裁剪**永久删除**（读盘/写盘/追加各一处），用户
@@ -284,6 +291,13 @@ def data_dir():
 class Store(object):
     _save_error = None        # 最近一次写盘错误（None 表示正常）
     _save_errors = {}         # v1.9.9.47：按文件分开记（tasks.json/history.json）
+    # v1.9.9.51：累计失败次数。旧版只比对错误字符串，横幅一旦被用户点 ×
+    # 关掉（`_save_warned=True`），同类错误就再也不弹——等于唯一的数据
+    # 丢失提示被永久静音。改成「每次失败 +1」，计数变了就重弹。
+    _save_fail_seq = 0
+    # v1.9.9.51：写盘失败**当场**通知界面（由 NoteApp 注入）。
+    # 旧版只靠 60 秒轮询，最坏一分钟内用户完全不知道数据没存进去。
+    notify_hook = None
 
     def __init__(self):
         self.path = os.path.join(data_dir(), "tasks.json")
@@ -696,6 +710,14 @@ class Store(object):
             msg = "%s: %s" % (type(e).__name__, e)
             Store._save_errors[key] = msg
             Store._save_error = msg
+            Store._save_fail_seq += 1
+            # v1.9.9.51：失败当刻就喊，不等下一次轮询
+            _hook = Store.notify_hook
+            if _hook:
+                try:
+                    _hook()
+                except Exception:
+                    pass
             try:
                 with open(os.path.join(data_dir(), "save_error.log"), "a",
                           encoding="utf-8") as lf:
@@ -1486,6 +1508,13 @@ class NoteApp(object):
             pass
         self._last_save_err = None     # 上一次提示过的保存错误
         self._save_warned = False
+        self._save_err_seq = -1        # v1.9.9.51：已提示过的失败次数
+        self._banner_sticky = False
+        # v1.9.9.51：写盘失败当刻回调本窗口，不再等 60 秒轮询
+        try:
+            Store.notify_hook = self._on_store_fail
+        except Exception:
+            pass
         self.overlay = False
         self._drag = None
         self._resizing = None
@@ -1591,18 +1620,38 @@ class NoteApp(object):
                 self.push("bot", tr("load_corrupt_notice",
                                     e=self.store.load_error or "?",
                                     p=self.store.corrupt_copy or "?"))
-                self._show_banner(
-                    tr("load_corrupt_banner",
-                       p=os.path.basename(self.store.corrupt_copy or "?")))
+                # v1.9.9.51：横幅上直接给「从最近备份恢复」。旧版只说
+                # 「副本另存在 …，可改名回 tasks.json 后重启」——普通用户
+                # 既不知道 backup 目录在哪，也不敢动文件，实际体验仍是
+                # 「数据没了」。
+                _hit = self._latest_snapshot("tasks.json")
+                if _hit:
+                    self._show_banner(
+                        tr("load_corrupt_banner_backup", d=_hit[0], n=_hit[1]),
+                        sticky=True, action=tr("banner_restore_now"),
+                        on_action=lambda: self._restore_snapshot(_hit[0], "tasks"))
+                else:
+                    self._show_banner(
+                        tr("load_corrupt_banner",
+                           p=os.path.basename(self.store.corrupt_copy or "?")),
+                        sticky=True)
             if getattr(self.store, "hist_failed", False):
                 self.push("bot", tr("hist_corrupt_notice",
                                     p=getattr(self.store, "hist_corrupt_copy", "?") or "?"))
                 if not getattr(self.store, "load_failed", False):
-                    self._show_banner(tr("hist_corrupt_banner"))
+                    _hh = self._latest_snapshot("history.json")
+                    if _hh:
+                        self._show_banner(
+                            tr("hist_corrupt_banner_backup", d=_hh[0], n=_hh[1]),
+                            sticky=True, action=tr("banner_restore_now"),
+                            on_action=lambda: self._restore_snapshot(_hh[0], "history"))
+                    else:
+                        self._show_banner(tr("hist_corrupt_banner"), sticky=True)
             # 数据目录不可写时明确告知（否则重启后任务全丢，用户毫无头绪）
             if Store.any_save_error():
                 self.push_tr("bot", "save_warn")
-                self._show_banner(tr("save_failed_banner"), kind="save")
+                self._show_banner(tr("save_failed_banner"), kind="save",
+                                  sticky=True)
             stage = int(getattr(self.store, "setup_stage", 0) or 0)
             nm = getattr(self.store, "user_name", "")
             if stage == 0:
@@ -2023,10 +2072,19 @@ class NoteApp(object):
                                     font=self.f_tiny, cursor="hand2")
         self._banner_btn.pack(side="right", padx=(0, 2))
         self._banner_btn.bind("<Button-1>", lambda e: self.open_data_dir())
+        # v1.9.9.51：横幅上的动作按钮（如「从最近备份恢复」）。数据损坏时
+        # 只告诉用户「副本在哪」等于让他自己去翻文件夹——普通用户做不到。
+        self._banner_act = tk.Label(self.banner, text="", bg=C.WARN_BG,
+                                    fg=C.WARN_FG, font=self.f_tiny,
+                                    cursor="hand2")
+        self._banner_act.pack(side="right", padx=(0, 6))
+        self._banner_act_bind = self._banner_act.bind(
+            "<Button-1>", lambda e: None)
+        self._banner_act.pack_forget()
         self._banner_x = tk.Label(self.banner, text="×", bg=C.WARN_BG,
                                   fg=C.WARN_FG, font=self.f_small, cursor="hand2")
         self._banner_x.pack(side="right", padx=(0, 6))
-        self._banner_x.bind("<Button-1>", lambda e: self._hide_banner())
+        self._banner_x.bind("<Button-1>", lambda e: self._banner_close())
         self.banner.bind("<Configure>", lambda e: self._banner_lbl.config(
             wraplength=max(120, e.width - 96)))
 
@@ -2544,18 +2602,38 @@ class NoteApp(object):
     # 此前每次 diag 都重新 open 文件——Windows 上杀毒软件扫描时会锁住文件，
     # open() 永久阻塞 → UI 线程卡死 →「未响应」。log 证实卡死都发生在
     # 回调第一行 diag 处，就是它。现在 UI 线程只往队列里放，磁盘完全交给后台线程。
-    def _show_banner(self, text, kind="warn", sticky=False):
+    def _show_banner(self, text, kind="warn", sticky=False,
+                     action=None, on_action=None):
         """顶部常驻横幅（v1.9.9.47）
 
         与 `flash` 的区别：横幅**不会自己消失**、不随聊天区滚走、也不被
         输入框裁切。数据损坏、保存失败这类「不说就等于骗人」的事只走这里。
-        sticky=True 时连 × 都不给点（致命问题必须先被看见）。"""
+        sticky=True 时连 × 都不给点（致命问题必须先被看见）。
+
+        v1.9.9.51：sticky 由「只把 × 文字清空」改为**真正不响应点击**——
+        旧版 `_banner_x.config(text="")` 只抹掉了字样，绑定还在，点到那块
+        空白仍会关掉横幅（用户实测「顺手一点就没了」）。另外支持挂一个
+        动作按钮 `action`（文案）+ `on_action`（回调）。"""
         try:
             if not getattr(self, "banner", None):
                 return
             self._banner_kind = kind
+            self._banner_sticky = bool(sticky)
             self._banner_lbl.config(text=text)
-            self._banner_x.config(text="" if sticky else "×")
+            self._banner_x.config(text="" if sticky else "×",
+                                  cursor="" if sticky else "hand2")
+            # 动作按钮：没有就藏起来，别占位置
+            try:
+                if action and on_action:
+                    self._banner_act.config(text=action)
+                    if not self._banner_act.winfo_ismapped():
+                        self._banner_act.pack(side="right", padx=(0, 6),
+                                              before=self._banner_x)
+                    self._banner_act.bind("<Button-1>", lambda e: on_action())
+                else:
+                    self._banner_act.pack_forget()
+            except Exception:
+                pass
             if not self.banner.winfo_ismapped():
                 try:
                     self.banner.pack(side="top", fill="x", after=self.head)
@@ -2566,37 +2644,73 @@ class NoteApp(object):
         except Exception:
             pass
 
+    def _banner_close(self):
+        """× 点击入口：sticky 横幅一律无视（保存失败不能说关就关）"""
+        if getattr(self, "_banner_sticky", False):
+            try:
+                self.flash(tr("banner_sticky_hint"))
+            except Exception:
+                pass
+            return
+        self._hide_banner()
+
     def _hide_banner(self):
         try:
             self.banner.pack_forget()
+            self._banner_sticky = False
+            try:
+                self._banner_act.pack_forget()
+            except Exception:
+                pass
         except Exception:
             pass
         self._banner_kind = None
 
-    def _check_save_error(self):
+    def _on_store_fail(self):
+        """v1.9.9.51：Store 写盘失败的即时回调（在主线程写盘时同线程执行）。
+
+        用 after(0) 排到事件循环下一拍，避免在 save() 调用栈中途改界面
+        引发重入；窗口已销毁时直接放弃（退出流程里还会再保存一次）。"""
+        try:
+            if not self.root.winfo_exists():
+                return
+            self.root.after(0, lambda: self._check_save_error(force=True))
+        except Exception:
+            pass
+
+    def _check_save_error(self, force=False):
         """v1.9.9.45：保存失败要**当场说**，不能等下次重启才发现。
 
         v1.9.9.47：① 错误按文件分开记，写 history 成功不会清掉 tasks 的
         错误（用户实测「锁 tasks.json 后全程无提示」）；② 提示改成顶部
         常驻横幅（旧版 push 进聊天流 + 气泡，会被输入框裁掉）；③ 恢复
-        成功要明确告诉用户「已恢复」，否则他不知道现在到底还丢不丢。"""
+        成功要明确告诉用户「已恢复」，否则他不知道现在到底还丢不丢。
+
+        v1.9.9.51：横幅改为**不可关闭**（sticky），且以 `_save_fail_seq`
+        变化为触发条件——旧版比字符串且 `_save_warned` 早退，用户点掉 ×
+        之后同类错误永久静默，正是「数据要丢」最危险的时刻。"""
         err = Store.any_save_error()
+        seq = Store._save_fail_seq
         if not err:
             if getattr(self, "_save_warned", False):
                 self._save_warned = False
+                self._save_err_seq = -1
                 self._hide_banner()
                 try:
                     self.push("bot", tr("save_recovered"))
                 except Exception:
                     pass
             return
-        if err == getattr(self, "_last_save_err", None) and \
-                getattr(self, "_save_warned", False):
+        # 同一个错误、失败次数没增加、且横幅还在 => 不必重复闪
+        if (not force and err == getattr(self, "_last_save_err", None)
+                and seq == getattr(self, "_save_err_seq", -1)
+                and getattr(self, "_save_warned", False)):
             return
         self._last_save_err = err
+        self._save_err_seq = seq
         self._save_warned = True
         # 横幅文案只讲人话；原始异常（带 .tmp 路径）留在日志里给维护者
-        self._show_banner(tr("save_failed_banner"), kind="save")
+        self._show_banner(tr("save_failed_banner"), kind="save", sticky=True)
         try:
             self.flash(tr("save_failed_short"))
         except Exception:
@@ -3284,7 +3398,8 @@ class NoteApp(object):
         if err:
             try:
                 from tkinter import messagebox
-                self._show_banner(tr("save_failed_banner"), kind="save")
+                self._show_banner(tr("save_failed_banner"), kind="save",
+                                  sticky=True)
                 ok = messagebox.askyesno(
                     self.app_name(), tr("quit_save_failed", e=err))
                 if not ok:
@@ -3710,6 +3825,17 @@ class NoteApp(object):
             return "break"
         text = self.entry.get().strip()
         if not text:
+            return "break"
+        # v1.9.9.51：超长输入当场拦下并说明原因。旧版一路往后走，
+        # 落库时静默少掉大半内容（用户实测 5220 字只剩 1681 字），
+        # 用户以为存好了，实际永久缺失。
+        if len(text) > MAX_INPUT:
+            self.flash(tr("text_too_long", n=len(text), mx=MAX_INPUT))
+            try:
+                self.push("bot", tr("text_too_long_chat", n=len(text),
+                                    mx=MAX_INPUT))
+            except Exception:
+                pass
             return "break"
         # v1.9.9.45：先处理、成功再清空。旧版一进来就 delete，解析链路
         # 抛异常时用户刚打的话从输入框消失（内容还在聊天记录里，但观感
@@ -5249,6 +5375,12 @@ class NoteApp(object):
             task["manual"] = bool(rec.get("prev_manual"))
         elif kind == "rename":
             task["title"] = rec.get("prev") or task["title"]
+            # v1.9.9.51：分数/手动标记一起回退。改名会自动重算 score，
+            # 只还标题的话「70 分改成 30 分再撤回」会停在 30。
+            if rec.get("prev_score") is not None:
+                task["score"] = rec.get("prev_score")
+            if rec.get("prev_manual") is not None:
+                task["manual"] = bool(rec.get("prev_manual"))
             # v1.9.9.47：标题回退了，**历史也得跟着退**。旧版只改 tasks，
             # 历史窗口今天还挂着改名后的名字（QA 实测 A3/B1）。
             # sync_history 现在会按 tid 就地纠正 title，这里同步一次即可。
@@ -5861,7 +5993,13 @@ class NoteApp(object):
                 scores = {"A": 95, "B": 70, "C": 45, "D": 20}
                 score = scores[letter_m.group(1).upper()]
                 title = _re_ad.sub(r"[，,、；;]?\s*[ABCD]\s*$", "", title).strip() or title
-            similar = self._find_similar(title)
+            # v1.9.9.51：过去日期的输入（「昨天交周报」）先不参与重复合并。
+            # 它多半是**补记**，而相似任务是今天/以后的活，并进今天的条目
+            # 会让日期彻底消失（QA 实测：连过期确认都走不到）。让它直接进
+            # 过期确认流程，用户想记就记成昨天那条。
+            _due_i = item[6] if (len(item) > 6 and item[6]) else None
+            _is_past = bool(_due_i and _due_i < dt.date.today())
+            similar = None if _is_past else self._find_similar(title)
             # v1.9.9.45：批量录入同名任务时不再每条都拦。用户在 2 分钟内
             # 对同一个标题答过一次「就这个」，说明他就是要重复建，
             # 后面同名条目直接建（旧版 20 条只落 1 条，用户体验极差）。
@@ -5888,7 +6026,7 @@ class NoteApp(object):
                 self._add_single(title, hhmm, score, dur, override=_batch_new)
                 continue
             dup = None
-            for task in self.store.tasks:
+            for task in ([] if _is_past else self.store.tasks):
                 # v1.9.9.32：日常任务即使今天已打卡（done=True）也算同名，
                 # 再输入「完成数学作业」是更新它，不是再建一条
                 if task["title"] == title and (not task.get("done")
@@ -6071,11 +6209,45 @@ class NoteApp(object):
         self.push_tr("bot", "note_saved", t=text)
 
     def _undo_last_note(self):
-        """撤回刚贴的那条便签（v1.9.9.47）
+        """撤回便签页的上一步
 
-        便签页说「撤回」以前会被当成新便签贴出去（内容就叫「撤回」），
-        越撤越多。现在删掉最后一条，并把内容回填到输入框。"""
+        v1.9.9.47：便签页说「撤回」以前会被当成新便签贴出去（内容就叫
+        「撤回」），越撤越多。现在删掉最后一条，并把内容回填到输入框。
+        v1.9.9.51：**接上删除栈**。此前 `_del_note` 明明压了 note_del，
+        撤回却固定删「最后一条」——删掉 A 再说撤回，实际删的是 B，A 永远
+        回不来；便签删空时又回「没有可撤回的便签」（QA 实测）。现在优先
+        从栈顶取 note_del 并放回原位置，栈里没有删除记录才退回旧行为。"""
+        rec = None
+        stack = getattr(self, "_undo_stack", None) or []
+        if stack and (stack[-1] or {}).get("kind") == "note_del":
+            rec = stack.pop()
+            self._undo_last = stack[-1] if stack else None
         notes = list(getattr(self.store, "notes", []) or [])
+        if rec is not None:
+            note = dict(rec.get("note") or {})
+            if not note.get("id"):
+                self.flash(tr("note_undo_empty"))
+                return
+            idx = rec.get("index")
+            if not (isinstance(idx, int) and 0 <= idx <= len(notes)):
+                idx = len(notes)
+            notes.insert(idx, note)
+            self.store.notes = notes
+            try:
+                self.store.save()
+            except Exception:
+                pass
+            try:
+                self.entry.delete(0, "end")
+                self.entry.insert(0, note.get("text", ""))
+            except Exception:
+                pass
+            try:
+                self.refresh_notes()
+            except Exception:
+                pass
+            self.flash(tr("note_undo_done"))
+            return
         if not notes:
             self.flash(tr("note_undo_empty"))
             return
@@ -7090,8 +7262,13 @@ class NoteApp(object):
                 # 旧版只有「点别处提交」那条路（_finish_edit_entry）压栈，
                 # 回车改错了想撤回，栈里根本没有这一步（QA 实测）。
                 if val != _old:
+                    # v1.9.9.51：连优先级一起记。改名会自动按新标题重算
+                    # score，旧版撤回只还标题，分数停在改名后的值（用户
+                    # 实测 70→30 撤回后仍是 30）。
                     self._push_undo({"kind": "rename", "id": task.get("id"),
                                      "prev": _old,
+                                     "prev_score": task.get("score"),
+                                     "prev_manual": bool(task.get("manual")),
                                      "label": "改名「%s」→「%s」" % (_old, val)})
                 task["title"] = val
                 if not task.get("manual"):
@@ -7175,8 +7352,11 @@ class NoteApp(object):
         if target is not None and val and val != target["title"]:
             _old = target.get("title", "")
             # v1.9.9.22：改名也可撤回
+            # v1.9.9.51：一并记住改名前的分数/手动标记（见上条注释）
             self._push_undo({"kind": "rename", "id": target.get("id"),
                              "prev": _old,
+                             "prev_score": target.get("score"),
+                             "prev_manual": bool(target.get("manual")),
                              "label": "改名「%s」→「%s」" % (_old, val)})
             target["title"] = val
             if not target.get("manual"):
@@ -9114,6 +9294,34 @@ class NoteApp(object):
                   bg=C.HEAD, fg=C.TEXT, relief="flat",
                   font=self.f_small, padx=10, pady=3).pack(side="right")
         lb.bind("<Double-Button-1>", lambda e: _go("tasks"))
+
+    def _latest_snapshot(self, name="tasks.json"):
+        """最近一份含指定文件的快照 -> (日期, 条数) 或 None（v1.9.9.51）
+
+        损坏时的「一键恢复」入口靠它挑目标：优先今天，其次最近几天。
+        只看有实际内容的快照——空壳恢复回来等于没恢复。"""
+        try:
+            import exporter as _exp
+            root_dir = _exp.backup_dir(data_dir())
+            for day in _exp.list_snapshots(data_dir()):
+                p = os.path.join(root_dir, day, name)
+                if not os.path.exists(p):
+                    continue
+                try:
+                    with open(p, "r", encoding="utf-8-sig") as f:
+                        obj = json.load(f) or {}
+                    key = "tasks" if name == "tasks.json" else "days"
+                    n = len(obj.get(key) or [])
+                except Exception:
+                    continue      # 这份快照自己也坏了，看下一份
+                if n <= 0:
+                    # 空壳快照恢复回去等于没恢复（启动瞬间就会留一份空的），
+                    # 继续往更早的日期找
+                    continue
+                return day, n
+        except Exception:
+            pass
+        return None
 
     def _restore_snapshot(self, day, which, win=None):
         """把某天快照里的 tasks.json / history.json 恢复回来"""

@@ -3,8 +3,8 @@
 # Windows 版本信息资源
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 9, 9, 50),
-    prodvers=(1, 9, 9, 50),
+    filevers=(1, 9, 9, 51),
+    prodvers=(1, 9, 9, 51),
     mask=0x3F,
     flags=0x0,
     OS=0x40004,
@@ -17,12 +17,12 @@ VSVersionInfo(
       StringTable('080404B0', [
         StringStruct('CompanyName', 'DailyNote'),
         StringStruct('FileDescription', '每日记事本 —— 聊天式待办便签'),
-        StringStruct("FileVersion", "1.9.9.50.0"),
+        StringStruct("FileVersion", "1.9.9.51.0"),
         StringStruct('InternalName', 'DailyNote'),
         StringStruct('LegalCopyright', '© 2026 DailyNote'),
         StringStruct('OriginalFilename', 'DailyNotebook.exe'),
         StringStruct('ProductName', '每日记事本'),
-        StringStruct("ProductVersion", "1.9.9.50.0"),
+        StringStruct("ProductVersion", "1.9.9.51.0"),
       ])
     ]),
     VarFileInfo([VarStruct('Translation', [2052, 1200])]),

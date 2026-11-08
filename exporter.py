@@ -116,6 +116,14 @@ def to_markdown(tasks, history, title="每日记事本 · 导出"):
         for r in rows:
             mark = "x" if r.get("done") else " "
             bits = []
+            # v1.9.9.51：补优先级。旧版导出只有标题/时间，用户做的
+            # 分档信息在归档里彻底丢失（用户实测对比过 JSON 与 MD）。
+            try:
+                _pl = _prio_label(r.get("score"))
+                if _pl:
+                    bits.append(_pl)
+            except Exception:
+                pass
             if r.get("hhmm"):
                 bits.append(r["hhmm"])
             if r.get("dur"):
@@ -132,6 +140,26 @@ def to_markdown(tasks, history, title="每日记事本 · 导出"):
                      (len([d for d in days if days[d]]), total_all, rate))
         lines.insert(3, "")
     return "\n".join(lines) + "\n"
+
+
+def _prio_label(score):
+    """优先级档位文案（与界面同一套文案，导出是中英双语的）"""
+    try:
+        score = float(score if score is not None else 0)
+    except (TypeError, ValueError):
+        return ""
+    try:
+        from i18n import t as _t
+        labels = _t("prio")
+    except Exception:
+        labels = ["紧急", "重要", "一般", "不急"]
+    if score >= 75:
+        return labels[0]
+    if score >= 55:
+        return labels[1]
+    if score >= 35:
+        return labels[2]
+    return labels[3]
 
 
 def _day_label(day, today):

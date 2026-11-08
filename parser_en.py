@@ -70,6 +70,28 @@ def find_time(seg):
         day_offset = 1
     elif "today" in text or "tonight" in text:
         day_offset = 0
+    # v1.9.9.51：next / this + 星期几、next week。
+    # 旧版只认 today/tomorrow/day after tomorrow，`review next monday 9am`
+    # 的日期被彻底丢掉（due_date=None），下午测试时 already-passed 判定
+    # 还会误触发「时间已过，还要加吗」。中文侧一直支持「下周一」。
+    if not day_offset:
+        _WD = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+               "friday": 4, "saturday": 5, "sunday": 6}
+        _m = re.search(r"\b(next|this|coming)\s+(%s)\b" % "|".join(_WD), text)
+        if _m:
+            _mode, _wd = _m.group(1), _WD[_m.group(2)]
+            _today_wd = dt.date.today().weekday()
+            if _mode == "this":
+                _delta = (_wd - _today_wd) % 7      # 本周内，已过则顺延
+            else:
+                _delta = (_wd - _today_wd) % 7
+                if _delta == 0:
+                    _delta = 7                      # next monday 不含今天
+            day_offset = _delta
+        elif re.search(r"\bnext\s+week\b", text):
+            day_offset = 7
+        elif re.search(r"\bweekend\b", text):
+            day_offset = (5 - dt.date.today().weekday()) % 7   # 本周六，已过则下周六
 
     now = dt.datetime.now()
     hhmm = None
@@ -138,6 +160,10 @@ def clean(seg):
     t = re.sub(r"\b\d{1,2}(:\d{2})?\s*(am|pm|a\.m\.|p\.m\.)\b", " ", t, flags=re.I)
     t = re.sub(r"\b(today|tomorrow|day after tomorrow|tonight|this morning|this afternoon|"
                r"this evening|morning|afternoon|evening|noon|midday|midnight)\b", " ", t, flags=re.I)
+    # v1.9.9.51：相对星期（next monday / this friday / next week）也算时间表达，
+    # 旧版不认识就把它们留在标题里，成了「review next Monday」这种半截任务名
+    t = re.sub(r"\b(next|this|coming|on)\s+(monday|tuesday|wednesday|thursday|friday|"
+               r"saturday|sunday|week|weekend)\b", " ", t, flags=re.I)
     t = re.sub(r"\b(\d{1,2})\s*o'?clock\b", " ", t, flags=re.I)
     # 时长（for 15 min / 2 hours）：不进标题，只作次要信息
     t = re.sub(r"\b(for|in|within|about|around)\s+\d{1,3}\s*"

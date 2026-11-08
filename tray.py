@@ -208,9 +208,16 @@ class Tray:
         return ctypes.windll.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
     def _invoke(self, fn):
-        """从托盘线程回到 Tk 主线程执行（Tk 不是线程安全的）"""
+        """从托盘线程回到 Tk 主线程执行（Tk 不是线程安全的）
+
+        v1.9.9.51：先确认窗口还活着。退出时 root 已 destroy，托盘线程
+        仍可能收到最后几次消息——此时 `after()` 会在已销毁的解释器上
+        取窗口 id，抛 OverflowError（QA 日志里强杀/退出时见过）。"""
         try:
-            self.app.root.after(0, fn)
+            root = getattr(self.app, "root", None)
+            if root is None or not root.winfo_exists():
+                return
+            root.after(0, fn)
         except Exception:
             pass
 
