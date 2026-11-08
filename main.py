@@ -27,7 +27,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.46"
+VERSION = "1.9.9.47"
 
 # 对话消息最多保留条数。v1.9.9.40 及以前是 60——聊天一多旧记录
 # 被三处 [-60:] 硬裁剪**永久删除**（读盘/写盘/追加各一处），用户
@@ -70,6 +70,10 @@ class _Tokens(object):
             return _mix(t["line"], t["text"], 0.45)
         if name == "DONE":            # 已完成文字：主题色掺灰
             return _mix(t["sub"], "#FFFFFF", 0.45)
+        if name == "WARN_BG":         # v1.9.9.47：常驻警示横幅底（暖黄）
+            return "#F6E3C0"
+        if name == "WARN_FG":         # 警示文字（深棕，对比度足够）
+            return "#7A4A12"
         if name == "INPUT_BG":
             return _mix(t["bg"], "#FFFFFF", 0.65)
         if name == "INPUT_LINE":
@@ -103,6 +107,129 @@ C = _Tokens(palette.THEMES[0])
 C_BAR_LOW = "#7C95AB"
 C_BAR_MID = "#E8942F"
 C_BAR_FULL = "#4CAF6E"
+
+
+def _norm_hhmm(v):
+    """把任意输入收成「HH:MM」或 None（导入/读盘共用）"""
+    try:
+        s = str(v or "").strip()
+    except Exception:
+        return None
+    m = re.fullmatch(r"(\d{1,2})\s*[:：]\s*(\d{1,2})", s)
+    if not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2))
+    if not (0 <= h <= 23 and 0 <= mi <= 59):
+        return None
+    return "%02d:%02d" % (h, mi)
+
+
+def _norm_date(v):
+    try:
+        s = str(v or "").strip()
+    except Exception:
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        try:
+            dt.date.fromisoformat(s)
+            return s
+        except Exception:
+            return None
+    return None
+
+
+def _norm_repeat(v):
+    """周期字段校验：结构不对就当没有（而不是让提醒循环每轮抛异常）"""
+    if not isinstance(v, dict):
+        return None
+    kind = v.get("kind")
+    if kind not in ("daily", "weekly", "monthly"):
+        return None
+    out = {"kind": kind, "weekday": None, "weekdays": None, "monthday": None}
+    try:
+        wd = v.get("weekdays")
+        if isinstance(wd, (list, tuple)):
+            days = []
+            for d in wd:
+                try:
+                    d = int(d)
+                except Exception:
+                    continue
+                if 0 <= d <= 6 and d not in days:
+                    days.append(d)
+            out["weekdays"] = days or None
+        w1 = v.get("weekday")
+        if w1 is not None:
+            w1 = int(w1)
+            if 0 <= w1 <= 6:
+                out["weekday"] = w1
+        md = v.get("monthday")
+        if md is not None:
+            md = int(md)
+            if 1 <= md <= 31:
+                out["monthday"] = md
+    except Exception:
+        pass
+    if kind == "weekly" and out["weekday"] is None and not out["weekdays"]:
+        return {"kind": "weekly", "weekday": None, "weekdays": None,
+                "monthday": None}
+    return out
+
+
+def normalize_tasks(tasks, today=None):
+    """导入 / 读盘时逐条规范化任务（v1.9.9.47）
+
+    手改过或第三方生成的 JSON 常常缺字段：没有 id 就删不掉、勾不了；
+    score 是字符串会让排序 TypeError；hhmm 写成「8点」会让提醒循环抛
+    异常并连累整轮。这里统一补全，坏值一律回到安全默认。"""
+    out, seen = [], set()
+    today = today or dt.date.today().isoformat()
+    for t in (tasks or []):
+        if not isinstance(t, dict):
+            continue
+        try:
+            title = t.get("title")
+            title = title.strip() if isinstance(title, str) else str(title or "").strip()
+        except Exception:
+            title = ""
+        if not title:
+            continue
+        tid = t.get("id")
+        tid = str(tid).strip() if tid is not None else ""
+        if not tid or tid in seen:
+            tid = "%d%03d" % (int(time.time() * 1000), random.randint(0, 999))
+            while tid in seen:
+                tid = "%d%03d" % (int(time.time() * 1000), random.randint(0, 999))
+        seen.add(tid)
+        try:
+            score = int(float(t.get("score", 30)))
+        except Exception:
+            score = 30
+        score = max(0, min(100, score))
+        try:
+            dur = t.get("dur")
+            dur = int(dur) if dur is not None else None
+        except Exception:
+            dur = None
+        rep = _norm_repeat(t.get("repeat"))
+        out.append({
+            "id": tid,
+            "title": title,
+            "hhmm": _norm_hhmm(t.get("hhmm")),
+            "dur": dur,
+            "score": score,
+            "manual": bool(t.get("manual")),
+            "done": bool(t.get("done")),
+            "created": str(t.get("created") or ""),
+            "day": _norm_date(t.get("day")) or today,
+            "due_date": _norm_date(t.get("due_date")),
+            "done_at": str(t.get("done_at") or ""),
+            "repeat": rep,
+            "streak": int(t.get("streak") or 0) if str(t.get("streak") or "0").strip().lstrip("-").isdigit() else 0,
+            "last_done": _norm_date(t.get("last_done")),
+        })
+    return out
+
 
 # v1.9.9.27：日常任务（每天/每周X 重复）专用色。
 # 用青绿色系与临时任务的「红橙蓝灰」优先级色区分开——日常不参与优先级，
@@ -156,6 +283,7 @@ def data_dir():
 
 class Store(object):
     _save_error = None        # 最近一次写盘错误（None 表示正常）
+    _save_errors = {}         # v1.9.9.47：按文件分开记（tasks.json/history.json）
 
     def __init__(self):
         self.path = os.path.join(data_dir(), "tasks.json")
@@ -237,25 +365,34 @@ class Store(object):
         self._apply_obj(obj)
 
     def _mark_corrupt(self, reason):
-        """数据文件读不了：**先把原文件留一份**，绝不无声覆盖。
+        """数据文件读不了：**把原文件改名保留**，绝不无声覆盖。
 
-        保留的不是「加载失败状态」而是原件本身——用户还能拿去人工抢救，
-        也方便我们复盘。副本名字带时间戳，多次损坏不会互相覆盖。"""
+        v1.9.9.45 只是 copy 一份副本，原件还留在原路径上——而 `__init__`
+        紧接着就会 save()，第一次写盘就把**原件覆盖成空数据**（用户实测：
+        启动后任务全空，去 data\\ 里翻副本才发现）。v1.9.9.47 改成 rename：
+        原路径腾空，之后的写入落在新文件上，真正的原件一个字节都没动。
+        副本名带时间戳，多次损坏不会互相覆盖。
+        返回值以外的情况（rename 跨盘失败等）降级为 copy，至少留一份。"""
         ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
         keep = self.path + ".corrupt-" + ts
+        self.corrupt_copy = None
         try:
-            shutil.copy2(self.path, keep)
+            os.replace(self.path, keep)      # 同目录改名，不跨盘，不会失败
             self.corrupt_copy = keep
         except Exception:
-            self.corrupt_copy = None
+            try:
+                shutil.copy2(self.path, keep)
+                self.corrupt_copy = keep
+            except Exception:
+                self.corrupt_copy = None
         self.load_failed = True
         self.load_error = reason
         try:
             with open(os.path.join(data_dir(), "load_error.log"), "a",
                       encoding="utf-8") as lf:
-                lf.write("%s  %s  %s\n" % (
+                lf.write("%s  %s  %s  （原件已保留为 %s）\n" % (
                     dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    self.path, reason))
+                    self.path, reason, self.corrupt_copy or "（复制失败）"))
         except Exception:
             pass
 
@@ -525,23 +662,60 @@ class Store(object):
 
     @staticmethod
     def _atomic(path, obj):
+        """原子写盘：先写 .tmp，flush + fsync，再 replace。
+
+        v1.9.9.47：加 fsync——旧版只 `os.replace`，数据还在内核页缓存里，
+        断电/蓝屏时 .tmp 已改名成功但内容没落盘，留下半截文件（就是
+        用户遇到的「tasks.json 变空/截断」的典型来源之一）。
+        files 的错误按文件分开记（见 _save_errors）：history.json 写成功
+        不得把 tasks.json 的错误清掉。"""
+        key = os.path.basename(path)
         try:
             tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(obj, f, ensure_ascii=False, indent=1)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass          # 某些网络盘不支持 fsync，忽略
             os.replace(tmp, path)
-            Store._save_error = None
+            Store._save_errors.pop(key, None)
+            if not Store._save_errors:
+                Store._save_error = None
+            try:
+                dfd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+                try:
+                    os.fsync(dfd)     # 让「改名」这个元数据操作也落盘
+                finally:
+                    os.close(dfd)
+            except Exception:
+                pass
         except Exception as e:
             # 不能静默：写盘失败要留痕，界面据此提示用户（否则重启即丢数据）
-            Store._save_error = "%s: %s" % (type(e).__name__, e)
+            msg = "%s: %s" % (type(e).__name__, e)
+            Store._save_errors[key] = msg
+            Store._save_error = msg
             try:
                 with open(os.path.join(data_dir(), "save_error.log"), "a",
                           encoding="utf-8") as lf:
                     lf.write("%s  %s  %s\n" % (
                         dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), path,
-                        Store._save_error))
+                        msg))
             except Exception:
                 pass
+
+    @classmethod
+    def any_save_error(cls):
+        """当前是否存在未恢复的写盘错误（按文件分开记，v1.9.9.47）
+
+        旧版所有文件共用一个类变量 `_save_error`：只锁 tasks.json 而
+        history.json 能写时，紧随其后的历史保存成功会把错误标志清空，
+        60 秒轮询读到 None，用户全程看不到任何提示。"""
+        for _k, v in list(getattr(cls, "_save_errors", {}).items()):
+            if v:
+                return v
+        return getattr(cls, "_save_error", None)
 
     @staticmethod
     def _hist_sig(rows):
@@ -598,6 +772,13 @@ class Store(object):
                 changed = True
             else:
                 old["score"] = max(old.get("score", 0), t.get("score", 0))
+                # v1.9.9.47：**改名要同步进历史**。旧版只更新分数/时间/完成态，
+                # 于是改完名历史窗口里今天还挂旧名字；撤回改名后历史还挂新
+                # 名字——两边都错（QA 实测 A3/B1）。同 tid 命中即视为同一条。
+                if tid and old.get("tid") == tid and title != old.get("title"):
+                    old["title"] = title
+                    by_title[title] = old
+                    changed = True
                 if t.get("hhmm") and not old.get("hhmm"):
                     old["hhmm"] = t.get("hhmm")
                 if t.get("done"):
@@ -1399,16 +1580,24 @@ class NoteApp(object):
         try:
             # v1.9.9.45：数据读不出来要**当面说**，并给出保留的副本路径。
             # 旧版静默变成空列表，用户以为「软件把我的东西吃了」。
+            # v1.9.9.47：改走顶部常驻横幅——旧版 push 进聊天流，而聊天区
+            # 可滚动、又被输入框裁切，等于把「你的数据出事了」藏进抽屉里。
             if getattr(self.store, "load_failed", False):
                 self.push("bot", tr("load_corrupt_notice",
                                     e=self.store.load_error or "?",
                                     p=self.store.corrupt_copy or "?"))
+                self._show_banner(
+                    tr("load_corrupt_banner",
+                       p=os.path.basename(self.store.corrupt_copy or "?")))
             if getattr(self.store, "hist_failed", False):
                 self.push("bot", tr("hist_corrupt_notice",
                                     p=getattr(self.store, "hist_corrupt_copy", "?") or "?"))
+                if not getattr(self.store, "load_failed", False):
+                    self._show_banner(tr("hist_corrupt_banner"))
             # 数据目录不可写时明确告知（否则重启后任务全丢，用户毫无头绪）
-            if getattr(Store, "_save_error", None):
+            if Store.any_save_error():
                 self.push_tr("bot", "save_warn")
+                self._show_banner(tr("save_failed_banner"), kind="save")
             stage = int(getattr(self.store, "setup_stage", 0) or 0)
             nm = getattr(self.store, "user_name", "")
             if stage == 0:
@@ -1644,7 +1833,7 @@ class NoteApp(object):
         y = max(8, min(y, sh - h - 40))
         r.geometry("%dx%d+%d+%d" % (w, h, x, y))
         r.minsize(250, 150)
-        r.protocol("WM_DELETE_WINDOW", self.close_or_hide)
+        r.protocol("WM_DELETE_WINDOW", self._on_close_btn)
         # v1.9.9.3：源码运行时窗口/任务栏分组也用新图标
         # （打包版的 exe 图标由 PyInstaller 编进 exe，见 每日记事本.spec）
         try:
@@ -1813,6 +2002,28 @@ class NoteApp(object):
         self.head.bind("<ButtonRelease-1>", lambda e: setattr(self, "_drag", None))
         # v1.9.4：删除「双击标题栏收起便签」手势 —— 双击会与连点其他按钮
         # （如中英转换）叠加误触收起功能，用户要求功能独立
+
+        # v1.9.9.47：**常驻提示横幅**（数据损坏 / 保存失败）。
+        # 旧版这两类要命的问题只是 push 进聊天流——而聊天区可滚动、还会被
+        # 输入框裁切，等于「报错藏在抽屉里」。横幅贴在标题栏正下方，不滚动、
+        # 不会自己消失，用户必须看见。
+        self.banner = tk.Frame(r, bg=C.WARN_BG, height=0)
+        self._banner_lbl = tk.Label(self.banner, text="", bg=C.WARN_BG,
+                                    fg=C.WARN_FG, font=self.f_tiny, anchor="w",
+                                    justify="left")
+        self._banner_lbl.pack(side="left", fill="x", expand=True, padx=(8, 4),
+                              pady=3)
+        self._banner_btn = tk.Label(self.banner, text=tr("banner_open_dir"),
+                                    bg=C.WARN_BG, fg=C.WARN_FG,
+                                    font=self.f_tiny, cursor="hand2")
+        self._banner_btn.pack(side="right", padx=(0, 2))
+        self._banner_btn.bind("<Button-1>", lambda e: self.open_data_dir())
+        self._banner_x = tk.Label(self.banner, text="×", bg=C.WARN_BG,
+                                  fg=C.WARN_FG, font=self.f_small, cursor="hand2")
+        self._banner_x.pack(side="right", padx=(0, 6))
+        self._banner_x.bind("<Button-1>", lambda e: self._hide_banner())
+        self.banner.bind("<Configure>", lambda e: self._banner_lbl.config(
+            wraplength=max(120, e.width - 96)))
 
         # 进度条（标题栏正下方，最顶部）
         self.bar = Canvas(r, height=26)
@@ -2008,9 +2219,11 @@ class NoteApp(object):
         bx = w - 14
         # v1.9.9.20：✕ 改成「收到托盘」（托盘可用时），右键才真正退出，
         # 这样关掉主窗口也不会丢提醒。托盘不可用（非 Windows）则保持退出。
-        self._btn_close(bx, h // 2,
-                        self.close_or_hide if self._tray_ok() else self.quit,
-                        "#B4463C")
+        # v1.9.9.47：**不能在绘制时**就把命令求值固化——托盘是启动 800ms
+        # 后才异步初始化的，早期绘制时 _tray_ok() 还是假，✕ 会被永久绑成
+        # quit；点图钉触发重绘后才变成 close_or_hide。用户实测同一颗按钮
+        # 「8 次退出、2 次隐藏」。现在交给 _on_close_btn，点击那一刻再判断。
+        self._btn_close(bx, h // 2, self._on_close_btn, "#B4463C")
         bx -= 22
         self._btn_line(bx, h // 2, self.minimize, C.TEXT)
         bx -= 22
@@ -2326,22 +2539,60 @@ class NoteApp(object):
     # 此前每次 diag 都重新 open 文件——Windows 上杀毒软件扫描时会锁住文件，
     # open() 永久阻塞 → UI 线程卡死 →「未响应」。log 证实卡死都发生在
     # 回调第一行 diag 处，就是它。现在 UI 线程只往队列里放，磁盘完全交给后台线程。
+    def _show_banner(self, text, kind="warn", sticky=False):
+        """顶部常驻横幅（v1.9.9.47）
+
+        与 `flash` 的区别：横幅**不会自己消失**、不随聊天区滚走、也不被
+        输入框裁切。数据损坏、保存失败这类「不说就等于骗人」的事只走这里。
+        sticky=True 时连 × 都不给点（致命问题必须先被看见）。"""
+        try:
+            if not getattr(self, "banner", None):
+                return
+            self._banner_kind = kind
+            self._banner_lbl.config(text=text)
+            self._banner_x.config(text="" if sticky else "×")
+            if not self.banner.winfo_ismapped():
+                try:
+                    self.banner.pack(side="top", fill="x", after=self.head)
+                except Exception:
+                    self.banner.pack(side="top", fill="x")
+            self._banner_lbl.config(wraplength=max(
+                120, self.banner.winfo_width() - 96))
+        except Exception:
+            pass
+
+    def _hide_banner(self):
+        try:
+            self.banner.pack_forget()
+        except Exception:
+            pass
+        self._banner_kind = None
+
     def _check_save_error(self):
         """v1.9.9.45：保存失败要**当场说**，不能等下次重启才发现。
 
-        旧版 `_save_error` 只在启动问候时读一次，运行期间失败完全无声；
-        用户以为记上了，重启才知道丢了。"""
-        err = Store._save_error
+        v1.9.9.47：① 错误按文件分开记，写 history 成功不会清掉 tasks 的
+        错误（用户实测「锁 tasks.json 后全程无提示」）；② 提示改成顶部
+        常驻横幅（旧版 push 进聊天流 + 气泡，会被输入框裁掉）；③ 恢复
+        成功要明确告诉用户「已恢复」，否则他不知道现在到底还丢不丢。"""
+        err = Store.any_save_error()
         if not err:
-            self._save_warned = False
+            if getattr(self, "_save_warned", False):
+                self._save_warned = False
+                self._hide_banner()
+                try:
+                    self.push("bot", tr("save_recovered"))
+                except Exception:
+                    pass
             return
         if err == getattr(self, "_last_save_err", None) and \
                 getattr(self, "_save_warned", False):
             return
         self._last_save_err = err
         self._save_warned = True
+        # 横幅文案只讲人话；原始异常（带 .tmp 路径）留在日志里给维护者
+        self._show_banner(tr("save_failed_banner"), kind="save")
         try:
-            self.push("bot", tr("save_failed_runtime", e=err))
             self.flash(tr("save_failed_short"))
         except Exception:
             pass
@@ -3012,7 +3263,34 @@ class NoteApp(object):
         # （跨天轮询/倒计时心跳/防抖等）和运行期动态创建的 Tcl 字体对象
         # 会在解释器销毁时被清到一半，Windows 上偶发
         # 「Fatal Error: alloc: invalid block」弹窗。
+        #
+        # v1.9.9.47：**先保存、再拆**。旧版顺序是「取消所有 after → 停诊断
+        # 线程 → 停托盘 → 关气泡 → 才保存并询问」；用户在「保存失败，仍要
+        # 退出吗？」里选「否」，窗口虽然回来了，但提醒不再响、托盘图标没了、
+        # 自动跨天也停了——一个半瘫的窗口（QA 实测）。现在保存和询问都在
+        # 一切还活着的时候做完，只有用户确认退出才开始拆。
         self._closing = True
+        self.store.sync_history()
+        self._save_note_pos()
+        self.store.save()
+        err = Store.any_save_error()
+        # v1.9.9.45：保存失败就别装作没事——旧版这里 save() 之后不管
+        # 结果直接 os._exit(0)，磁盘满/文件被占用时最后一次改动静默丢失。
+        if err:
+            try:
+                from tkinter import messagebox
+                self._show_banner(tr("save_failed_banner"), kind="save")
+                ok = messagebox.askyesno(
+                    self.app_name(), tr("quit_save_failed", e=err))
+                if not ok:
+                    # 什么都不拆，原样继续跑（定时器/托盘/气泡都还在）
+                    self._closing = False
+                    self.root.deiconify()
+                    self.root.lift()
+                    return
+            except Exception:
+                pass
+        # ——以下才是真正的拆除（用户已确认退出）——
         # 先把窗口藏起来：点关闭立刻视觉响应，后台安静收尾
         try:
             self.root.withdraw()
@@ -3043,23 +3321,6 @@ class NoteApp(object):
             b.close()
         for c in list(getattr(self, "_due_cards", [])):
             c.close()
-        self.store.sync_history()
-        self._save_note_pos()
-        self.store.save()
-        # v1.9.9.45：保存失败就别装作没事——旧版这里 save() 之后不管
-        # 结果直接 os._exit(0)，磁盘满/文件被占用时最后一次改动静默丢失。
-        if Store._save_error:
-            try:
-                from tkinter import messagebox
-                self.root.deiconify()
-                ok = messagebox.askyesno(
-                    self.app_name(), tr("quit_save_failed", e=Store._save_error))
-                if not ok:
-                    self._closing = False
-                    self.root.lift()
-                    return
-            except Exception:
-                pass
         self.close_history()
         try:
             self.root.update_idletasks()
@@ -3450,6 +3711,15 @@ class NoteApp(object):
         # 就是「白打了」）。失败时把原文回填，并记日志。
         self._retire_enter_hint()      # 第一次成功发送后撤掉「回车发送」
         if self.list_mode == "note":
+            # v1.9.9.47：便签页说「撤回」不能变成一条叫【撤回】的便签。
+            # 旧版 note 分支直接 add_note，用户想撤刚贴的便签，结果又贴了
+            # 一张写着「撤回」的（QA 实测）。先走撤回意图识别。
+            try:
+                if self._undo_re().match(text) or self._undo_intent().match(text):
+                    self._undo_last_note()   # 内部会把内容回填输入框
+                    return "break"
+            except Exception:
+                pass
             try:
                 self.add_note(text)
             except Exception as exc:
@@ -4969,6 +5239,13 @@ class NoteApp(object):
             task["manual"] = bool(rec.get("prev_manual"))
         elif kind == "rename":
             task["title"] = rec.get("prev") or task["title"]
+            # v1.9.9.47：标题回退了，**历史也得跟着退**。旧版只改 tasks，
+            # 历史窗口今天还挂着改名后的名字（QA 实测 A3/B1）。
+            # sync_history 现在会按 tid 就地纠正 title，这里同步一次即可。
+            try:
+                self.store.sync_history()
+            except Exception:
+                pass
         self.store.save()
         self.refresh_tasks(scroll_top=True)
         return tr("undo_generic_done", label=label)
@@ -5770,6 +6047,37 @@ class NoteApp(object):
         # 就是两行一模一样的字，看起来像重复了（用户实测问题 12）
         self.push_tr("bot", "note_saved", t=text)
 
+    def _undo_last_note(self):
+        """撤回刚贴的那条便签（v1.9.9.47）
+
+        便签页说「撤回」以前会被当成新便签贴出去（内容就叫「撤回」），
+        越撤越多。现在删掉最后一条，并把内容回填到输入框。"""
+        notes = list(getattr(self.store, "notes", []) or [])
+        if not notes:
+            self.flash(tr("note_undo_empty"))
+            return
+        last = notes.pop()
+        try:
+            self.store.notes = notes
+            self.store.save()
+        except Exception:
+            pass
+        try:
+            self._push_undo({"kind": "note_del", "note": last,
+                             "index": len(notes), "label": "删除便签"})
+        except Exception:
+            pass
+        try:
+            self.entry.delete(0, "end")
+            self.entry.insert(0, (last or {}).get("text", ""))
+        except Exception:
+            pass
+        try:
+            self.refresh_notes()
+        except Exception:
+            pass
+        self.flash(tr("note_undo_done"))
+
     def _del_note(self, nid):
         """删除便签（v1.9.9.45：可撤回）。
 
@@ -6247,6 +6555,30 @@ class NoteApp(object):
     def _tray_ok(self):
         return bool(getattr(self, "_tray", None) and self._tray.available)
 
+    def _on_close_btn(self):
+        """✕ 的真正行为：**点击这一刻**才判断托盘状态（v1.9.9.47）。
+
+        旧版在 draw_head 里把 `close_or_hide if _tray_ok() else quit`
+        求值后绑死。托盘是启动后延迟 800ms 异步初始化的，早期绘制时
+        _tray_ok() 为假 → ✕ 被永久绑成 quit（真退出）；点过图钉触发
+        重绘才变回 close_or_hide。同一颗按钮两种行为，用户实测连点
+        10 次里 8 次退出、2 次隐藏。
+        现在每次点击都重新判断：托盘在 → 收进托盘；托盘确实不可用
+        （非 Windows / 初始化失败，_tray_failed 为真）→ 退出（此时哲言栏
+        右键菜单仍有「退出」，不会出现藏起来找不回的死局）。
+        托盘「还没初始化好」（启动 800ms 内的空窗）按可用处理——它随后
+        就会出现，先藏起来是对的，不能因为抢跑了半秒就把程序退掉。"""
+        try:
+            if getattr(self, "_tray_failed", False):
+                self.quit()
+            else:
+                self.close_or_hide()
+        except Exception:
+            try:
+                self.quit()
+            except Exception:
+                pass
+
     def close_or_hide(self):
         """✕：一律藏进后台，进程永不因关窗退出（v1.9.9.24，用户明确要求）。
 
@@ -6696,6 +7028,13 @@ class NoteApp(object):
             val = e.get().strip()
             if val:
                 _old = task.get("title", "")
+                # v1.9.9.47：回车/FocusOut 提交的改名**也要进撤回栈**。
+                # 旧版只有「点别处提交」那条路（_finish_edit_entry）压栈，
+                # 回车改错了想撤回，栈里根本没有这一步（QA 实测）。
+                if val != _old:
+                    self._push_undo({"kind": "rename", "id": task.get("id"),
+                                     "prev": _old,
+                                     "label": "改名「%s」→「%s」" % (_old, val)})
                 task["title"] = val
                 if not task.get("manual"):
                     task["score"] = core.score_task(val, val, task.get("hhmm"))
@@ -8587,6 +8926,10 @@ class NoteApp(object):
         m.add_separator()
         # v1.9.9.45：能导出不能导入 = 备份不可恢复。补上恢复入口，
         # 恢复前先把当前数据另存一份，避免「恢复」变成第二次事故。
+        # v1.9.9.47：再加一个**按日期列备份**的专用窗——旧版恢复要用户
+        # 自己在通用文件框里走进 data\backup\<日期>\ 挑文件（QA 实测：
+        # 恢复入口太隐蔽，等于没有）。
+        m.add_command(label=tr("restore_backup"), command=self.open_backup_restore)
         m.add_command(label=tr("import_json"), command=self.restore_from_json)
         m.add_command(label=tr("export_open_dir"),
                       command=self.open_data_dir)
@@ -8599,12 +8942,158 @@ class NoteApp(object):
         finally:
             m.grab_release()
 
+    def open_backup_restore(self):
+        """「从备份恢复」专用窗（v1.9.9.47）
+
+        旧版只能走通用文件选择框，用户得自己知道去 `data\\backup\\<日期>\\`
+        里翻——等于把「救命的入口」藏在了只有开发者知道的地方（QA 实测）。
+        现在按日期倒序列出快照，显示「几条任务 / 几条历史」，点一下就恢复。
+        恢复前先把当前文件另存一份，恢复错了还能再回来。"""
+        try:
+            import exporter as _exp
+            snaps = _exp.list_snapshots(data_dir())
+        except Exception:
+            snaps = []
+        win = tk.Toplevel(self.root)
+        win.title(tr("restore_backup") + " · " + self.app_name())
+        win.configure(bg=C.BG)
+        win.geometry("440x400+260+160")
+        win.transient(self.root)
+        tk.Label(win, text=tr("restore_hint"), bg=C.BG, fg=C.SUB,
+                 font=self.f_tiny, wraplength=410, justify="left"
+                 ).pack(side="top", anchor="w", padx=10, pady=(8, 4))
+        body = tk.Frame(win, bg=C.BG)
+        body.pack(side="top", fill="both", expand=True, padx=10)
+        lb = tk.Listbox(body, bg=C.INPUT_BG, fg=C.TEXT, font=self.f_small,
+                        relief="flat", highlightthickness=1,
+                        highlightbackground=C.LINE, activestyle="none")
+        lb.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(body, orient="vertical", command=lb.yview)
+        sb.pack(side="right", fill="y")
+        lb.config(yscrollcommand=sb.set)
+        rows = []
+        root_dir = ""
+        try:
+            import exporter as _exp2
+            root_dir = _exp2.backup_dir(data_dir())
+        except Exception:
+            pass
+        for day in snaps:
+            d = os.path.join(root_dir, day)
+            nt = nh = 0
+            try:
+                with open(os.path.join(d, "tasks.json"), "r",
+                          encoding="utf-8-sig") as f:
+                    nt = len((json.load(f) or {}).get("tasks") or [])
+            except Exception:
+                pass
+            try:
+                with open(os.path.join(d, "history.json"), "r",
+                          encoding="utf-8-sig") as f:
+                    nh = len((json.load(f) or {}).get("days") or {})
+            except Exception:
+                pass
+            rows.append((day, nt, nh))
+            lb.insert("end", "  %s    %d 条任务 · %d 天历史" % (day, nt, nh))
+        if not rows:
+            lb.insert("end", "  " + tr("restore_empty"))
+            lb.itemconfig(0, foreground=C.SUB)
+        btns = tk.Frame(win, bg=C.BG)
+        btns.pack(side="bottom", fill="x", padx=10, pady=8)
+
+        def _pick():
+            try:
+                i = lb.curselection()
+                if not i or not rows:
+                    return None
+                return rows[i[0]]
+            except Exception:
+                return None
+
+        def _go(which):
+            r = _pick()
+            if not r:
+                self.flash(tr("restore_pick_first"))
+                return
+            self._restore_snapshot(r[0], which, win)
+
+        tk.Button(btns, text=tr("restore_tasks"), command=lambda: _go("tasks"),
+                  bg=C.ACCENT, fg="#FFFFFF", relief="flat",
+                  font=self.f_small, padx=12, pady=3).pack(side="left")
+        tk.Button(btns, text=tr("restore_hist"), command=lambda: _go("history"),
+                  bg=C.HEAD, fg=C.TEXT, relief="flat",
+                  font=self.f_small, padx=12, pady=3).pack(side="left", padx=6)
+        tk.Button(btns, text=tr("export_open_dir"), command=self.open_data_dir,
+                  bg=C.HEAD, fg=C.TEXT, relief="flat",
+                  font=self.f_small, padx=10, pady=3).pack(side="left")
+        tk.Button(btns, text=tr("close"), command=win.destroy,
+                  bg=C.HEAD, fg=C.TEXT, relief="flat",
+                  font=self.f_small, padx=10, pady=3).pack(side="right")
+        lb.bind("<Double-Button-1>", lambda e: _go("tasks"))
+
+    def _restore_snapshot(self, day, which, win=None):
+        """把某天快照里的 tasks.json / history.json 恢复回来"""
+        from tkinter import messagebox
+        try:
+            import exporter as _exp
+            src_dir = os.path.join(_exp.backup_dir(data_dir()), day)
+        except Exception:
+            return
+        name = "tasks.json" if which == "tasks" else "history.json"
+        src = os.path.join(src_dir, name)
+        dst = self.store.path if which == "tasks" else self.store.hist_path
+        if not os.path.exists(src):
+            self.flash(tr("restore_missing", n=name))
+            return
+        if not messagebox.askyesno(
+                self.app_name(), tr("restore_confirm", d=day, n=name)):
+            return
+        ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        try:
+            if os.path.exists(dst):
+                shutil.copy2(dst, dst + ".before-restore-" + ts)
+        except Exception:
+            pass
+        try:
+            shutil.copy2(src, dst)
+        except Exception as exc:
+            self.push("bot", tr("import_fail", e=str(exc)))
+            return
+        # 重新读回来，界面立刻反映
+        try:
+            if which == "tasks":
+                self.store.load()
+                self.store.sync_history()
+                self.refresh_tasks(scroll_top=True)
+                self.draw_bar()
+                self.render_messages()
+            else:
+                self.store.hist_failed = False
+                self.store.load_history()
+                if getattr(self, "_hist_win", None) is not None and \
+                        self._hist_win.winfo_exists():
+                    self._render_history()
+        except Exception:
+            pass
+        self._hide_banner()
+        self.push("bot", tr("restore_ok", d=day, n=name))
+        try:
+            if win is not None and win.winfo_exists():
+                win.destroy()
+        except Exception:
+            pass
+
     def restore_from_json(self):
         """从导出的 JSON 恢复任务 / 历史 / 对话（v1.9.9.45）。
 
         恢复前会先把当前 tasks.json 另存一份 `.before-import-时间戳`，
         万一选错文件还能回到原样。主题/语言不跟着改（会牵动整套界面
-        重建，留给设置里手动选）。"""
+        重建，留给设置里手动选）。
+
+        v1.9.9.47：导入前**逐条规范化**。旧版直接 `[t for t in tasks
+        if isinstance(t, dict)]` 塞进内存——缺 id 的任务导入「成功」之后
+        刷新、删除、勾选全部报错（被异常兜底接住，但等于功能不可用，
+        用户还以为是软件坏了）。"""
         from tkinter import filedialog, messagebox
         try:
             p = filedialog.askopenfilename(
@@ -8630,20 +9119,29 @@ class NoteApp(object):
         if not messagebox.askyesno(
                 self.app_name(), tr("import_confirm", n=len(tasks))):
             return
-        # 先保命：当前数据另存一份
+        # 先保命：当前数据另存一份（v1.9.9.47 连历史一起备份——
+        # 旧版只备份 tasks.json，导入一份带 history 的 JSON 会把历史覆盖掉
+        # 且无法回退；messages 存在 tasks.json 里，随它一起备份）
         try:
             ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
             shutil.copy2(self.store.path, self.store.path + ".before-import-" + ts)
         except Exception:
             pass
-        self.store.tasks = [t for t in tasks if isinstance(t, dict)]
+        try:
+            ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            shutil.copy2(self.store.hist_path,
+                         self.store.hist_path + ".before-import-" + ts)
+        except Exception:
+            pass
+        self.store.tasks = normalize_tasks(tasks)
         hist = obj.get("history")
         if isinstance(hist, dict):
-            self.store.history = {k: v for k, v in hist.items()
+            self.store.history = {k: [r for r in v if isinstance(r, dict)]
+                                  for k, v in hist.items()
                                   if isinstance(v, list)}
         msgs = obj.get("messages")
         if isinstance(msgs, list):
-            self.store.messages = msgs[-MSG_KEEP:]
+            self.store.messages = [m for m in msgs if isinstance(m, dict)][-MSG_KEEP:]
         st = obj.get("settings") or {}
         try:
             if st.get("user_name"):
