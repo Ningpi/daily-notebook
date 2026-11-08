@@ -27,7 +27,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.47"
+VERSION = "1.9.9.48"
 
 # 对话消息最多保留条数。v1.9.9.40 及以前是 60——聊天一多旧记录
 # 被三处 [-60:] 硬裁剪**永久删除**（读盘/写盘/追加各一处），用户
@@ -1360,14 +1360,19 @@ class Bubble(object):
         def _need(t):
             """v1.9.9.13：单行「内容净宽」= 色条3 + 标题padx16 + 标题宽
             + (间隔·+时间宽) —— 不再带 56px 基线和 20px 富余，
-            中缝压缩到固定 8px。"""
+            中缝压缩到固定 8px。
+
+            v1.9.9.48：日常任务行首画的是「● 标题」，● 和空格的宽度
+            之前没算进去——右侧「每天 20:30」被挤出条外裁掉半个字
+            （用户实测「每天有遮挡」）。"""
             dl = self._dl_text(t)
+            _pre = "● " if self.app._is_daily(t) else ""
             if f_row is not None:
                 extra = (f_row.measure("· " + dl) + 8) if dl else 0
-                tw = f_row.measure(t["title"])
+                tw = f_row.measure(_pre + t["title"])
             else:
                 extra = (len(dl) * round(7 * fsc) + 8) if dl else 0
-                tw = len(t["title"]) * round(13 * fsc)
+                tw = (len(_pre) + len(t["title"])) * round(13 * fsc)
             return 27 + tw + extra
 
         # v1.9.9.13：先对全部行预计算，取最大值作为统一宽度——
@@ -4816,6 +4821,11 @@ class NoteApp(object):
         # 用户建一条「每天背单词」要连答三次才能安心，成本太高。
         if self._is_daily(task):
             need_pri = False
+            # v1.9.9.48：日常任务也不问「截止时间」——没写钟点就是
+            # 「那天做」，不是「那天 18:00 前」。旧版配合 parser 的
+            # 18:00 兜底，用户说「每周一背单词」被追问提醒设置，
+            # 感觉像被强行确定成晚上6点。
+            need_dl = False
         if _re.search(r"(?<![A-Za-z])[ABCD](?![A-Za-z])", _raw, _re.I):
             need_pri = False     # 用户已用字母表态
         # 「晚上八点提醒我…」= 用户指定了一个时刻，本身就够明确了，
@@ -5447,10 +5457,16 @@ class NoteApp(object):
         return self._list_report()
 
     def _q_done_today(self, text, parsed, pz):
-        """「今天做了什么」→ 播报今天勾掉的任务（v1.9.9.28）"""
+        """「今天做了什么」→ 播报今天勾掉的任务（v1.9.9.28）
+
+        v1.9.9.48：补英文问法「what did I do today / what did I finish」。"""
         if not re.fullmatch(r"[\s，,]*(?:今天|今日)(?:都)?(?:做了|干了|完成了|做完|搞定了?)"
                             r"(?:些)?(?:什么|啥|哪些)(?:事|活|活儿|任务)?(?:呢|吗|？|\?)?"
-                            r"[\s。.！!～~]*", text or ""):
+                            r"[\s。.！!～~]*", text or "") \
+                and not re.fullmatch(
+                    r"(?:what|which)\s+(?:did|i\s+done|have)\s*(?:i|we)?\s*"
+                    r"(?:do|did|finish(ed)?|complete[d]?|get\s+done)"
+                    r"(?:\s+today)?\s*[?！!]?", (text or "").strip().lower()):
             return None
         rows = [r for r in (self.store.history.get(self.store._today()) or [])
                 if r.get("done")]
@@ -5499,7 +5515,10 @@ class NoteApp(object):
         # v1.9.9.31：「完成数学作业，每天晚上八点」里的「完成」是**建任务**的
         # 动词不是打卡——句子里带重复信号（每天/每周/工作日）时
         # 绝不按完成语处理，交给建任务流程
-        if re.search(r"每[天周月日]|工作日|礼拜[一二三四五六日天]|天天", text or ""):
+        if re.search(r"每[天周月日]|工作日|礼拜[一二三四五六日天]|天天", text or "") \
+                or re.search(r"\b(?:every|each)\s+(?:day|week|month|weekday|"
+                             r"workday|monday|tuesday|wednesday|thursday|"
+                             r"friday|saturday|sunday)\b", text or "", re.I):
             return False, False
         soft = bool(re.search(r"(打个?卡|打卡|签到|签个到)", text or "")) or \
             bool(re.match(r"^[\s，,]*(?:我)?(?:今天|刚刚|已经)?\s*"
@@ -5545,7 +5564,11 @@ class NoteApp(object):
             idx_title = self._done_by_index(text)
             if idx_title is not None:
                 return True, idx_title
-        if re.search(r"(打个?卡|打卡|签到|签个到)", text or ""):
+        # v1.9.9.48：纯打卡话补英文（checked in / check in），旧版只认
+        # 中文——英文用户说「checked in」会被建成叫「checked in」的任务
+        if re.search(r"(打个?卡|打卡|签到|签个到)", text or "") \
+                or re.search(r"\b(?:i\s+)?(?:checked?\s+in|check\s*in|"
+                             r"done\s+checking\s+in)\b", text or "", re.I):
             return True, tr("checkin_hint")
         return False, None
 
@@ -6855,14 +6878,30 @@ class NoteApp(object):
         return tr("done_notfound", title="第%s个任务" % raw)
 
     def _is_list_query(self, text):
-        """「列表 / 我的任务 / 今天有什么任务 / 看看待办」这类查列表意图"""
+        """「列表 / 我的任务 / 今天有什么任务 / 看看待办」这类查列表意图
+
+        v1.9.9.48：补英文。旧版正则只认中文（外加 todo/list 两个单词），
+        英文用户说「what's on my list」「my tasks」「what do I have」
+        会被当成新任务建出来（用户实测）。「show me my tasks」这类
+        长句超 16 字上限也一并放宽。"""
         import re as _re
         t = (text or "").strip()
-        if len(t) > 16:
+        if len(t) > 40:
             return False
-        # v1.9.9.28：这里的 `[\s，,]*` 前缀让「打个卡 背单词」也命中
-        # （「打个卡」被当成前导空白外的任意内容）→ 一句打卡被当成查列表。
-        # 改成先剥掉首尾标点空白，再整句精确匹配。
+        # ---- 英文：整句匹配常见问法
+        te = _re.sub(r"[\s!?.…]+$", "", t).strip().lower()
+        if _re.fullmatch(
+                r"(?:what'?s|what is|show|show me|list|give|tell me)\s*"
+                r"(?:me\s+)?(?:on\s+|for\s+|my\s+|the\s+|todays?\s+|today'?s\s+)*"
+                r"(?:my\s+|the\s+)?(?:todo|to-?dos?|tasks?|list|schedule|"
+                r"agenda|unfinished|remaining|left)\b[?！!]?", te) \
+                or _re.fullmatch(r"(?:my\s+)?(?:todo|to-?dos?|tasks?|list|"
+                                 r"unfinished|remaining)\b[?！!]?", te) \
+                or _re.fullmatch(r"(?:what|which)\s+(?:do\s+i|have\s+i)\s+"
+                                 r"(?:still\s+)?(?:have|need)\s+"
+                                 r"(?:to\s+do|left|remaining)"
+                                 r"(?:\s+today)?\b[?！!]?", te):
+            return True
         t2 = _re.sub(r"^[\s，,]+|[\s，,。.！!～~？?]+$", "", t)
         # v1.9.9.46：主命令词从「列表」换成「未完成」——「列表」跟界面上
         # 的历史/清单容易混，而用户真实的话术是「我还有什么没完成」
@@ -6955,6 +6994,19 @@ class NoteApp(object):
             self.cal_btn.configure(text=tr("cal_btn"))
             self.alpha_btn.configure(text=tr("alpha_btn"))
             self.bubble_btn.configure(text=tr("bubble_btn"))
+        except Exception:
+            pass
+        # v1.9.9.48：「日常」按钮也是 Label，切语言必须跟着刷——
+        # 旧版漏了它，英文界面挂着中文「日常」、中文界面挂着英文
+        # 「Daily」，要点一次别的页面才恢复（用户实测）
+        try:
+            self.daily_btn.configure(text=tr("daily_btn"))
+        except Exception:
+            pass
+        # 「回车发送」提示同样只在创建时取语言，切语言后残留旧语言
+        try:
+            if getattr(self, "hint_lbl", None) is not None:
+                self.hint_lbl.configure(text=tr("enter_send_hint"))
         except Exception:
             pass
         self.f_note.configure(text=self.today_text())
@@ -7315,11 +7367,15 @@ class NoteApp(object):
         self._clock_win = win
         win.title(tr("clock_title"))
         win.configure(bg=C.BG)
-        geom = getattr(self.store, "clock_geom", None) or "260x220+120+120"
+        geom = getattr(self.store, "clock_geom", None) or "780x620+120+90"
+        # v1.9.9.48：旧默认 260x220 挤得按钮都显示不全（用户实测）。
+        # 老用户存值若还是旧默认原样升级；自己拖过大小的（宽>400）不动。
+        if not geom or geom.startswith("260x220"):
+            geom = "780x620+120+90"
         try:
             win.geometry(geom)
         except Exception:
-            win.geometry("260x220+120+120")
+            win.geometry("780x620+120+90")
         win.minsize(220, 180)
         win.attributes("-topmost", True)
         win.attributes("-alpha", min(1.0, getattr(self.store, "alpha", 0.95) + 0.02))
@@ -8065,7 +8121,13 @@ class NoteApp(object):
         # 优先级值带档位色，一眼分清急缓（v1.9.7）
         # v1.9.9.19：行标签从「调整优先级」改成「优先级」——原来复用
         # 右键菜单的 menu_priority，读起来像能在这里调优先级
-        rows = [(tr("pri_label"), label, pcolor)]
+        # v1.9.9.48：日常任务不参与优先级，不再显示「优先级：一般」——
+        # 用户从没被问过优先级，却看到「确定为一般」，以为是软件乱定
+        # （用户实测）。频率行由下方末尾的 detail_repeat 统一补充。
+        if rep:
+            rows = []
+        else:
+            rows = [(tr("pri_label"), label, pcolor)]
         # 周期任务：下次到期日（每周X任务显示「下个周四」，也是提醒时刻的基准）
         nxt = self._next_occurrence(task) if rep else None
         if task.get("hhmm"):
@@ -8574,15 +8636,19 @@ class NoteApp(object):
                 cv.create_rectangle(x0 + 4, y0 + 2, x0 + cw - 4, y0 + ch - 4,
                                     fill=C.ACCENT, outline="", stipple="gray25")
             hol, fest = cn_holidays.get(ds)
+            # v1.9.9.48：休/班角标跟语言走（英文界面不再冒出中文）
+            _off_txt = tr("cal_off_day")
+            _on_txt = tr("cal_work_day")
+            _off_tag = ("休", "班")
             col = "#E2434B" if c in (0, 6) or hol == "休" else C.TEXT
             cv.create_text(x0 + cw / 2, y0 + 20, text=str(d + 1),
                            font=(self.f_ui, 12, "bold"), fill=col, tags=(tag,))
             # 休 / 班 角标
             if hol == "休":
-                cv.create_text(x0 + cw - 14, y0 + 12, text="休",
+                cv.create_text(x0 + cw - 14, y0 + 12, text=_off_txt,
                                font=self.f_tiny, fill="#E2434B", tags=(tag,))
             elif hol == "班":
-                cv.create_text(x0 + cw - 14, y0 + 12, text="班",
+                cv.create_text(x0 + cw - 14, y0 + 12, text=_on_txt,
                                font=self.f_tiny, fill="#3E8ED0", tags=(tag,))
             # 节日名
             if fest:
@@ -8767,6 +8833,13 @@ class NoteApp(object):
                            font=self.f_tiny, fill=s_col, tags=("dm_" + tid,))
             cv.tag_bind("dm_" + tid, "<Button-1>",
                         lambda e, k=tid: self.open_task_detail(k))
+            # v1.9.9.48：管理窗里也支持右键——改时间 / 调优先级 / 删除，
+            # 与主列表同一套菜单（row_menu 不依赖画布坐标，直接复用）。
+            # 之前管理窗只能点进去看详情，想改时间得绕回主窗口。
+            cv.tag_bind("dm_" + tid, "<Button-3>",
+                        lambda e, k=tid: self.row_menu(e, k))
+            cv.tag_bind("dm_" + tid, "<Button-2>",
+                        lambda e, k=tid: self.row_menu(e, k))
             cv.tag_bind("dm_" + tid, "<Enter>",
                         lambda e: cv.config(cursor="hand2"))
             cv.tag_bind("dm_" + tid, "<Leave>",

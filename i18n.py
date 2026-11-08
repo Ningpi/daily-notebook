@@ -527,6 +527,9 @@ STRINGS = {
     "detail_spent": ("用时", "Spent"),
     # v1.9.9.44：「重复」改叫「频率」，值已是「每周四」式描述
     "detail_repeat": ("频率", "Frequency"),
+    # v1.9.9.48：日历休/班角标随语言
+    "cal_off_day": ("休", "Off"),
+    "cal_work_day": ("班", "Work"),
     # 日常任务的「下次到期」替代一次性截止日期
     "detail_next": ("下次", "Next"),
     # 提醒行说清「提前多久 + 实际提醒时刻」

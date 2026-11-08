@@ -466,6 +466,12 @@ def find_times(text):
     # ——否则会凭空多出一个当天截止，且 clean_title 还会只剥掉第一个星期几。
     if find_weekday_multi(text):
         wdelta, wraw = None, None
+    # v1.9.9.48：**任何周期任务都不兜底 18:00**。旧版只拦了「每周一三五」
+    # 连写，「每周一背单词」单个星期几漏网——用户没说时间却被定成
+    # 晚上6点（用户实测），还会因此追问「提前多久提醒」。周期任务没写
+    # 钟点就该没有 hhmm，到点机制由 repeat 本身管。
+    if find_repeat(text):
+        wdelta, wraw = None, None
     if wdelta is not None and not has_clock and not _has_period:
         out.append(("18:00", (18, 0), 0, wraw))
 

@@ -221,9 +221,81 @@ def has_priority_signal(raw):
         r"top\s*priority|a\s*priority)\b", (raw or ""), _re.I))
 
 
+def find_repeat(text):
+    """v1.9.9.48：英文周期表达 -> {"kind", "weekday", "weekdays", "monthday"}
+
+    与中文解析器同构（main 的 _is_daily / _daily_due_today 直接复用）。
+    识别 every day / daily / every week / every monday / on mondays /
+    every weekday / every month 等。识别不出返回 None。"""
+    t = (text or "").lower()
+    if not t:
+        return None
+    m = re.search(r"\b(?:every|each)\s+(?:single\s+)?month\b|\bmonthly\b", t)
+    if m:
+        return {"kind": "monthly", "weekday": None, "weekdays": None,
+                "monthday": None}
+    wd_names = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+                "friday": 4, "saturday": 5, "sunday": 6,
+                "mon": 0, "tue": 1, "tues": 1, "wed": 2, "thu": 3,
+                "thur": 3, "thurs": 3, "fri": 4, "sat": 5, "sun": 6}
+    days = []
+    for m in re.finditer(r"\b(?:(every|each)\s+(?:single\s+)?|on\s+)?"
+                         r"(monday|tuesday|wednesday|thursday|friday|"
+                         r"saturday|sunday|mon|tues?|weds?|thur?s?|fri|sat|sun)"
+                         r"(s?)\b", t):
+        # 周期判定：every/each 修饰，或复数形式（on Mondays = 每周一）。
+        # 单数「on Monday / meeting Monday」是一次性约会，不算日常。
+        pre = (m.group(1) or "").strip()
+        plural = m.group(3) == "s"
+        if not pre and not plural:
+            continue
+        d = wd_names.get(m.group(2))
+        if d is not None and d not in days:
+            days.append(d)
+    if days:
+        return {"kind": "weekly", "weekday": days[0], "weekdays": days,
+                "monthday": None}
+    if re.search(r"\b(?:every|each)\s+(?:single\s+)?day\b|\bdaily\b|"
+                 r"\b(?:every|each)\s+day\s+of\s+the\s+week\b|\beveryday\b", t):
+        return {"kind": "daily", "weekday": None, "weekdays": None,
+                "monthday": None}
+    if re.search(r"\b(?:every|each|on)\s+(?:week\s*days?|work\s*days?|weekdays?)\b"
+                 r"|\bweekdays\b", t):
+        return {"kind": "weekly", "weekday": 0,
+                "weekdays": [0, 1, 2, 3, 4], "monthday": None}
+    if re.search(r"\b(?:every|each)\s+week\b|\bweekly\b", t):
+        return {"kind": "weekly", "weekday": None, "weekdays": None,
+                "monthday": None}
+    return None
+
+
+# v1.9.9.48：英文疑问句不是任务。「what did I do today」「what's on my
+# list」此前被建成任务（查询入口只认中文，parser 这层也没拦）。
+_QSTART_RE = re.compile(
+    r"^\s*(?:what|when|where|why|who|how)('?s|\s+(?:did|do|does|is|are|was|"
+    r"were|should|can|could|i|we|to|about|much|many|long))"
+    r"|^\s*(?:did|do|does|is|are|can|could|should)\s+"
+    r"(?:i|we|you|he|she|they|it|there|that)\b"
+    r"|^\s*(?:is|was)\s+there\b", re.I)
+
+
+def _is_question(text):
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _QSTART_RE.match(t):
+        return True
+    # 句首疑问词 + 问号（「Buy milk?」是用户自问，不当任务更好——
+    # 但太激进会拦掉「buy milk?」这种随手记，只拦真疑问词开头）
+    return bool(re.match(r"^\s*(?:what|when|where|why|who|how)\b", t, re.I)
+                and t.endswith("?"))
+
+
 def parse_tasks(text, fallback=True):
     text = (text or "").strip()
     if not text:
+        return []
+    if _is_question(text):
         return []
     results, seen = [], set()
     for seg in split_segments(text):
@@ -241,7 +313,22 @@ def parse_tasks(text, fallback=True):
             continue
         seen.add(key)
         # v1.9.9.45：标题不再硬截断（显示层负责省略）
-        results.append((title, hhmm, score(title, seg, hhmm, passed, offset), seg, _dur(seg)))
+        # v1.9.9.48：补 repeat（item[5]）——英文「every monday」此前被
+        # 当成普通临时任务，主窗口天天挂着（与中文行为不一致）
+        rep = find_repeat(seg) or find_repeat(text)
+        # 「every monday」这类周期词不留标题（同中文 clean 的行为）
+        if rep:
+            title = re.sub(
+                r"\b(?:every|each)\s+(?:single\s+)?"
+                r"(?:day|week|month|weekday|workday|mondays?|tuesdays?|"
+                r"wednesdays?|thursdays?|fridays?|saturdays?|sundays?|"
+                r"mons?|tues?|weds?|thur?s?|fris?|sats?|suns?)\b\s*"
+                r"|\bmondays\b\s*|\btuesdays\b\s*|\bwednesdays\b\s*"
+                r"|\bthursdays\b\s*|\bfridays\b\s*|\bsaturdays\b\s*"
+                r"|\bsundays\b\s*|\bweekly\b\s*|\bdaily\b\s*",
+                "", title, flags=re.I).strip() or title
+        results.append((title, hhmm, score(title, seg, hhmm, passed, offset),
+                        seg, _dur(seg), rep, None))
     if not results and fallback:
         # Fallback: a plain sentence like "buy milk" still becomes a task
         text2 = re.sub(r"^(?:please\s+|remember\s+to\s+|don'?t\s+forget\s+to\s+"
