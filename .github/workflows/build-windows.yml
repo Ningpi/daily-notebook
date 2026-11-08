@@ -36,25 +36,31 @@ jobs:
       - name: 校验产物
         run: |
           dir dist
-          if (!(Test-Path "dist\每日记事本.exe")) { throw "打包失败：未找到 exe" }
+          if (!(Test-Path "dist\DailyNotebook.exe")) { throw "打包失败：未找到 exe" }
         shell: pwsh
 
       - name: 上传构建产物（Actions 页可下载）
         uses: actions/upload-artifact@v4
         with:
-          name: 每日记事本-windows
-          path: dist/每日记事本.exe
+          name: DailyNotebook-windows
+          path: dist/DailyNotebook.exe
+
+      - name: 加版本号重命名（供 Release 下载）
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: Copy-Item dist\DailyNotebook.exe dist\DailyNotebook-${{ github.ref_name }}.exe
+        shell: pwsh
 
       - name: 发布到 Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/每日记事本.exe
+          # 下载文件名带版本号（ASCII，避免浏览器下载时出现 default 之类怪名）
+          files: dist/DailyNotebook-${{ github.ref_name }}.exe
           generate_release_notes: true
           body: |
             ## 下载
 
-            点下方 **Assets** 里的 `每日记事本.exe` 即可下载，双击即用。
+            点下方 **Assets** 里的 `DailyNotebook-${{ github.ref_name }}.exe` 即可下载，双击即用。
 
             - 免安装、无需 Python、完全离线、无广告
             - 系统要求：Windows 10 / 11（64 位）

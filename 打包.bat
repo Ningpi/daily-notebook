@@ -53,7 +53,7 @@ if errorlevel 1 (
 echo.
 echo ============================================
 echo   打包完成！
-echo   EXE 位置：dist\每日记事本.exe
+echo   EXE 位置：dist\DailyNotebook.exe
 echo   双击即可运行；右键可发送到桌面快捷方式。
 echo ============================================
 echo.

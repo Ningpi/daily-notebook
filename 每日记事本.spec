@@ -21,7 +21,9 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='每日记事本',
+    # 注意：必须用 ASCII 名。PyInstaller 在 Windows 上对非 ASCII 的 name
+    # 会回退输出 default.exe（v1.9.9.48 Release 曾因此叫 default.exe）。
+    name='DailyNotebook',
     debug=False,
     strip=False,
     upx=False,
