@@ -575,7 +575,7 @@ STRINGS = {
     "daily_mgr_today_no": ("今天不用", "Not today"),
     "daily_mgr_done": ("今天已打卡", "Done today"),
     "daily_mgr_empty": ("还没有日常任务。建任务时带上「每天/每周几」即可，\n如「每天早上7点背单词」",
-                        "No daily tasks yet. Include \"every day\" or \"every Monday\" when adding"),
+                        "No daily tasks yet.\nInclude \"every day\" or \"every Monday\" when adding,\ne.g. \"memorize words at 7am every day\""),
     "daily_mgr_days": ("{n} 天", "{n}d"),
     # v1.9.9.46：底栏计数拆成两段（日常段青色 / 临时段灰色）
     "cnt_daily": ("日常任务 {d}/{n}", "Daily {d}/{n}"),

@@ -27,7 +27,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.49"
+VERSION = "1.9.9.50"
 
 # 对话消息最多保留条数。v1.9.9.40 及以前是 60——聊天一多旧记录
 # 被三处 [-60:] 硬裁剪**永久删除**（读盘/写盘/追加各一处），用户
@@ -7009,6 +7009,12 @@ class NoteApp(object):
                 self.hint_lbl.configure(text=tr("enter_send_hint"))
         except Exception:
             pass
+        # v1.9.9.50：日常任务管理窗开着时，顶部提示也要跟语言刷新
+        try:
+            if getattr(self, "_dmgr_hint_lbl", None) is not None:
+                self._dmgr_hint_lbl.configure(text=tr("daily_mgr_hint"))
+        except Exception:
+            pass
         self.f_note.configure(text=self.today_text())
         # 底部哲言要随语言换：英文模式显示英文那句，中文模式显示中文那句
         self.restore_quote()
@@ -8774,9 +8780,11 @@ class NoteApp(object):
         win.configure(bg=C.BG)
         win.geometry("430x430+240+150")
         win.attributes("-alpha", min(1.0, getattr(self.store, "alpha", 0.95) + 0.04))
-        tk.Label(win, text=tr("daily_mgr_hint"), bg=C.BG, fg=C.SUB,
-                 font=self.f_tiny, wraplength=400, justify="left"
-                 ).pack(side="top", anchor="w", padx=10, pady=(8, 2))
+        # v1.9.9.50：保存引用，切语言后 refresh_labels 会刷新这行提示
+        self._dmgr_hint_lbl = tk.Label(win, text=tr("daily_mgr_hint"),
+                                       bg=C.BG, fg=C.SUB, font=self.f_tiny,
+                                       wraplength=400, justify="left")
+        self._dmgr_hint_lbl.pack(side="top", anchor="w", padx=10, pady=(8, 2))
         wrap = tk.Frame(win, bg=C.BG)
         wrap.pack(side="top", fill="both", expand=True, padx=8, pady=(0, 8))
         self._dmgr_cv = tk.Canvas(wrap, bg=C.BG, highlightthickness=0)
@@ -8800,8 +8808,11 @@ class NoteApp(object):
         tasks = [t for t in self.store.tasks if self._is_daily(t)]
         tasks.sort(key=lambda t: (t.get("hhmm") or "99:99"))
         if not tasks:
+            # v1.9.9.50：wraplength 按窗宽自动换行——英文空态文案一行很长，
+            # 旧版被右缘截断（用户实测「when addin...」）
             cv.create_text(w / 2, 90, text=tr("daily_mgr_empty"),
-                           fill=C.SUB, font=self.f_small, justify="center")
+                           fill=C.SUB, font=self.f_small, justify="center",
+                           width=max(240, w - 60))
             cv.config(scrollregion=(0, 0, w, 180))
             return
         y = 4
