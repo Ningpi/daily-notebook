@@ -27,7 +27,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.48"
+VERSION = "1.9.9.49"
 
 # 对话消息最多保留条数。v1.9.9.40 及以前是 60——聊天一多旧记录
 # 被三处 [-60:] 硬裁剪**永久删除**（读盘/写盘/追加各一处），用户

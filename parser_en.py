@@ -312,6 +312,10 @@ def parse_tasks(text, fallback=True):
         if key in seen:
             continue
         seen.add(key)
+        # v1.9.9.49：补 due 日期（item[6]）。此前 tomorrow / day after tomorrow
+        # 的 day_offset 被直接丢弃，主程序按「今天」判断，导致下午说
+        # 「tomorrow 3pm」被误判成「时间已过」并追问，用户还得再答一次
+        due = (dt.date.today() + dt.timedelta(days=offset)) if offset else None
         # v1.9.9.45：标题不再硬截断（显示层负责省略）
         # v1.9.9.48：补 repeat（item[5]）——英文「every monday」此前被
         # 当成普通临时任务，主窗口天天挂着（与中文行为不一致）
@@ -328,7 +332,7 @@ def parse_tasks(text, fallback=True):
                 r"|\bsundays\b\s*|\bweekly\b\s*|\bdaily\b\s*",
                 "", title, flags=re.I).strip() or title
         results.append((title, hhmm, score(title, seg, hhmm, passed, offset),
-                        seg, _dur(seg), rep, None))
+                        seg, _dur(seg), rep, due))
     if not results and fallback:
         # Fallback: a plain sentence like "buy milk" still becomes a task
         text2 = re.sub(r"^(?:please\s+|remember\s+to\s+|don'?t\s+forget\s+to\s+"
@@ -341,7 +345,10 @@ def parse_tasks(text, fallback=True):
             if m2:
                 h = int(m2.group(1)) % 12 + (12 if m2.group(3).lower() == "pm" else 0)
                 hhmm = "%02d:%02d" % (h, int(m2.group(2) or 0))
-            results.append((t, hhmm, score(t, text2, hhmm, False, 0), text2, _dur(text2)))
+            _off = find_time(text2)[2]
+            _due = (dt.date.today() + dt.timedelta(days=_off)) if _off else None
+            results.append((t, hhmm, score(t, text2, hhmm, False, _off),
+                            text2, _dur(text2), None, _due))
             results.sort(key=lambda x: (-x[2], x[1] or "99:99"))
     return results
 
