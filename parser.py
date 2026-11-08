@@ -365,7 +365,11 @@ def find_deadline_date(text):
                 # 半年内的过去日期原样保留，上层做「已过截止日期」确认
                 return d, m.group(0)
             except ValueError:
-                pass
+                # v1.9.9.52：用户写明了月日但那天不存在（2月30日）。
+                # 旧版 pass 后落到下面的「N号」规则，把「2月30日」解析成
+                # 「当月30号」——凭空给出一个错误的截止日，比没有更糟。
+                return None, None
+        return None, None
     m = re.search(r"(\d{1,2})\s*[/-]\s*(\d{1,2})(?!\d)", text)
     if m:
         mo, dy = int(m.group(1)), int(m.group(2))
@@ -376,7 +380,8 @@ def find_deadline_date(text):
                     d = dt.date(today.year + 1, mo, dy)
                 return d, m.group(0)
             except ValueError:
-                pass
+                return None, None        # 同上：2/30 之类
+        return None, None
     # 4.5) 月底（当月最后一天）
     m = re.search(r"(?:这个月|本月|月)底", text)
     if m:
@@ -412,9 +417,12 @@ def find_times(text):
     out = []
 
     # 1) 数字型 "9:30"
+    # v1.9.9.52：分钟也要校验。旧版只检查小时，「9:99」能产出 "09:99"，
+    # 一路写进 tasks.json；提醒循环 now.replace(minute=99) 抛 ValueError
+    # 被 except 吞掉 → 这条任务**永远不会提醒**，界面上却显示得好好的。
     for m in re.finditer(r"(\d{1,2})\s*[:：]\s*(\d{1,2})", text):
         h, mi = int(m.group(1)), int(m.group(2))
-        if 0 <= h <= 23:
+        if 0 <= h <= 23 and 0 <= mi <= 59:
             out.append((f"{h:02d}:{mi:02d}", (h, mi), m.start(), m.group(0)))
     # 1.5) 「下午三点到四点」这种区间：取开始时间，避免被后面的「四点」覆盖
     _rng = re.search(
@@ -455,6 +463,8 @@ def find_times(text):
             mi = {"一刻": 15, "两刻": 30, "二刻": 30, "三刻": 45}[m.group(3)]
         else:
             mi = int(m.group(4)) if m.group(4) else (_num(m.group(5)) if m.group(5) else 0)
+        if not (0 <= mi <= 59):
+            continue        # v1.9.9.52：「5点65分」不是时间，不能拼出 05:65
         out.append((f"{h:02d}:{mi:02d}", (h, mi), m.start(), m.group(0)))
     # 3) 只有时段词
     for w, idx in _hits_of(text, PER_WORDS):
@@ -1368,6 +1378,7 @@ def parse_tasks(text, fallback=True):
         return []
     results, seen = [], set()
     prev = None
+    _ctx_due = None          # v1.9.9.52：本句已出现过的日期（供后续段继承）
     for seg in split_segments(text):
         # 「完成作业的优先级很重要」这类「XX的<评价>」：整体并入任务 XX
         m_de = re.match(r"^(.{1,8}?)的[^，。]{0,10}(?:重要|紧急|要紧|优先级|重要程度)", seg)
@@ -1400,6 +1411,15 @@ def parse_tasks(text, fallback=True):
         hhmm, passed, offset = (times[0][0], times[0][1], times[0][3]) if times else (None, False, 0)
         dur, dur_raw = find_duration(seg)
         due_d, due_raw = find_deadline_date(seg)
+        # v1.9.9.52：同句日期继承。「明天9点开会，10点写周报」里用户只对
+        # 第一段说了「明天」，第二段显然也是明天；旧版第二段的 due 为空，
+        # 界面按「今天 10:00 已过」拦下来问「要不要加」——用户以为第二条
+        # 没记上（实测）。只在「本段带钟点、且自己没写日期」时继承，
+        # 免得把「明天开会，顺便买菜」的无时间任务也硬塞一个日期。
+        if due_d is None and hhmm and _ctx_due is not None:
+            due_d = _ctx_due
+        if due_d is not None:
+            _ctx_due = due_d
         # 「两小时后出发」：时长本身要剔，但紧跟的「后」也得一起剔，
         # 否则会剩一句「后出发」。同理「3天后」。
         _hit_extra = []

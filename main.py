@@ -27,7 +27,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.51"
+VERSION = "1.9.9.52"
 
 # 单条输入的长度上限（v1.9.9.51）
 # 用户实测贴长文会「少了一大截」甚至卡住，而程序既不提示也不报错。
@@ -335,6 +335,240 @@ class Store(object):
         self.load()
         self.load_history()
         self.sync_history()
+        # v1.9.9.52：读盘时修过的脏字段回写一次。否则界面上显示的是
+        # 修正后的值、磁盘里还是坏值，下次启动又得再修一遍。
+        if getattr(self, "_dirty_fix", False) and not getattr(self, "load_failed", False):
+            try:
+                self.save()
+            except Exception:
+                pass
+        if getattr(self, "_dirty_hist", False) and not getattr(self, "hist_failed", False):
+            try:
+                self.save_history()
+            except Exception:
+                pass
+
+    # ---------------- 脏数据清洗（v1.9.9.52）
+    # 背景：v1.9.9.45 只处理了「整份 JSON 读不懂」。但**读得懂、字段坏**的
+    # 文件依然能让界面启动就崩（手改、旧版本残留、网盘同步冲突都会产生）：
+    #   · tasks 里少一个 title → 74 处 t["title"] KeyError；
+    #   · quotes 被写成数字 → self.quotes.setdefault 抛 AttributeError；
+    #   · score 是「高」这类字符串 → 排序里的 -score 抛 TypeError；
+    #   · due_date 写成 2026-13-45 → 日历/提醒解析抛 ValueError。
+    # 这里把所有读盘来的对象修成 UI 能安全使用的形状：能补的补默认，
+    # **不丢整条**（丢一条等于替用户删数据），确实无法理解的才跳过。
+    _TASK_KEYS_DEFAULT = {
+        "hhmm": None, "dur": None, "score": 50, "manual": False, "done": False,
+        "created": "", "day": "", "repeat": None, "due_date": None,
+        "deadline_txt": None, "remind_before": 0, "remind_at": None,
+        "remind_day": 0, "reminded": False, "reminded_day": None,
+        "done_at": None, "_from_raw": False, "streak": 0, "last_done_day": None,
+        "dur_min": None,
+    }
+
+    @staticmethod
+    def _to_num(v, default=0, lo=None, hi=None, cast=int):
+        try:
+            n = cast(float(v))
+        except (TypeError, ValueError, OverflowError):
+            return default
+        if n != n:                       # NaN
+            return default
+        if lo is not None and n < lo:
+            n = lo
+        if hi is not None and n > hi:
+            n = hi
+        return n
+
+    @staticmethod
+    def _to_bool(v, default=False):
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return bool(v)
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in ("1", "true", "yes", "y", "on", "是"):
+                return True
+            if s in ("0", "false", "no", "n", "off", "否", ""):
+                return False
+        return default
+
+    @staticmethod
+    def _clock_ok(v):
+        """hhmm / remind_at 必须是 HH:MM，且小时分钟都在范围内"""
+        if not isinstance(v, str) or ":" not in v:
+            return False
+        a, b = v.split(":", 1)
+        try:
+            return 0 <= int(a) <= 23 and 0 <= int(b) <= 59
+        except ValueError:
+            return False
+
+    @classmethod
+    def _sanitize_task(cls, raw, used_ids, lang="zh"):
+        if not isinstance(raw, dict):
+            return None
+        t = dict(raw)
+        for k in ("title", "created", "day", "dur", "deadline_txt"):
+            v = t.get(k)
+            if v is not None and not isinstance(v, str):
+                t[k] = str(v)
+        title = (t.get("title") or "").strip()
+        if not title:
+            # 标题空了也不能整条丢：给占位名，用户还能在界面上看到并删掉
+            title = "(untitled task)" if lang == "en" else "（未命名任务）"
+        t["title"] = title
+        tid = t.get("id")
+        tid = "" if tid is None else str(tid).strip()
+        if not tid or tid in used_ids:
+            for _ in range(50):
+                tid = "%d%03d" % (int(time.time() * 1000), random.randint(0, 999))
+                if tid not in used_ids:
+                    break
+        used_ids.add(tid)
+        t["id"] = tid
+        for k, dv in cls._TASK_KEYS_DEFAULT.items():
+            if k not in t:
+                t[k] = dv
+        t["score"] = cls._to_num(t.get("score"), 50, 0, 100)
+        t["done"] = cls._to_bool(t.get("done"), False)
+        t["manual"] = cls._to_bool(t.get("manual"), False)
+        t["reminded"] = cls._to_bool(t.get("reminded"), False)
+        t["_from_raw"] = cls._to_bool(t.get("_from_raw"), False)
+        t["remind_before"] = cls._to_num(t.get("remind_before"), 0, 0, 1440)
+        t["remind_day"] = cls._to_num(t.get("remind_day"), 0, 0, 3650)
+        t["streak"] = cls._to_num(t.get("streak"), 0, 0)
+        t["dur_min"] = t.get("dur_min") if isinstance(t.get("dur_min"), (int, float)) else None
+        if not cls._clock_ok(t.get("hhmm")):
+            if t.get("hhmm") is not None:
+                t["deadline_txt"] = None
+            t["hhmm"] = None
+        if not cls._clock_ok(t.get("remind_at")):
+            t["remind_at"] = None
+        dd = t.get("due_date")
+        if dd is not None:
+            try:
+                dt.date.fromisoformat(str(dd)[:10])
+                t["due_date"] = str(dd)[:10]
+            except Exception:
+                t["due_date"] = None
+        rep = t.get("repeat")
+        if rep is not None:
+            if isinstance(rep, str):      # 旧数据把 repeat 存成「每周三」
+                try:
+                    rep = core.find_repeat(rep)
+                except Exception:
+                    rep = None
+            if not isinstance(rep, dict):
+                rep = None
+            else:
+                # kind 必须是这四种之一：repeat_due_today 对未知 kind 只会
+                # 安静地返回 False（不抛），于是坏 repeat 会一直留着，
+                # 任务天天被压进「今天不该做」——等于从清单里消失。
+                try:
+                    if rep.get("kind") not in ("daily", "weekly", "monthly", "workday"):
+                        raise ValueError("bad kind")
+                    core.repeat_due_today(rep)
+                except Exception:
+                    rep = None
+            t["repeat"] = rep
+        return t
+
+    @classmethod
+    def _sanitize_tasks(cls, raw_list, lang="zh"):
+        if not isinstance(raw_list, list):
+            return [], True
+        out, used, changed = [], set(), False
+        for raw in raw_list:
+            t = cls._sanitize_task(raw, used, lang)
+            if t is None:
+                changed = True
+                continue
+            if t != raw:
+                changed = True
+            out.append(t)
+        return out, changed
+
+    @classmethod
+    def _sanitize_notes(cls, raw_list, lang="zh"):
+        if not isinstance(raw_list, list):
+            return [], True
+        out, used, changed = [], set(), False
+        for raw in raw_list:
+            if not isinstance(raw, dict):
+                changed = True
+                continue
+            n = dict(raw)
+            for k in ("text", "id", "color", "created"):
+                v = n.get(k)
+                if v is not None and not isinstance(v, str):
+                    n[k] = str(v)
+            nid = n.get("id")
+            nid = "" if nid is None else str(nid).strip()
+            if not nid or nid in used:
+                for _ in range(50):
+                    nid = "%d%03d" % (int(time.time() * 1000), random.randint(0, 999))
+                    if nid not in used:
+                        break
+            used.add(nid)
+            n["id"] = nid
+            n.setdefault("text", "")
+            n.setdefault("color", "")
+            n.setdefault("created", "")
+            if n.get("x") is not None:
+                n["x"] = cls._to_num(n.get("x"), 0)
+            if n.get("y") is not None:
+                n["y"] = cls._to_num(n.get("y"), 0)
+            if n != raw:
+                changed = True
+            out.append(n)
+        return out, changed
+
+    @classmethod
+    def _sanitize_messages(cls, raw_list, lang="zh"):
+        """消息/气泡共用：role 只认 me/bot，text 必须是字符串"""
+        if not isinstance(raw_list, list):
+            return [], True
+        out, changed = [], False
+        for raw in raw_list:
+            if not isinstance(raw, dict):
+                changed = True
+                continue
+            m = dict(raw)
+            role = m.get("role")
+            if role not in ("me", "bot"):
+                m["role"] = "bot" if role not in ("system",) else "bot"
+                changed = True
+            if not isinstance(m.get("text"), str):
+                m["text"] = "" if m.get("text") is None else str(m.get("text"))
+                changed = True
+            if not isinstance(m.get("t"), str):
+                m["t"] = ""
+                changed = True
+            out.append(m)
+        return out[-MSG_KEEP:], changed
+
+    @classmethod
+    def _sanitize_quotes(cls, q, legacy_last="", legacy_recent=None):
+        """quotes 必须是 {"zh": {last, recent}, "en": {...}}；坏成数字/字符串
+        时重建，否则 self.quotes.setdefault 在启动阶段就 AttributeError。"""
+        if not isinstance(q, dict):
+            q = {"zh": {"last": legacy_last, "recent": legacy_recent or []},
+                 "en": {"last": "", "recent": []}}
+        out = {}
+        for k in ("zh", "en"):
+            st = q.get(k)
+            if not isinstance(st, dict):
+                st = {}
+            last = st.get("last")
+            recent = st.get("recent")
+            out[k] = {
+                "last": last if isinstance(last, str) else "",
+                "recent": [x for x in (recent if isinstance(recent, list) else [])
+                           if isinstance(x, str)][-60:],
+            }
+        return out
 
     @staticmethod
     def _today():
@@ -421,43 +655,49 @@ class Store(object):
             except Exception:
                 return default
 
-        self.tasks = _safe(lambda: [t for t in obj.get("tasks", [])
-                                    if isinstance(t, dict)], []) or []
-        # 坏时间清洗（B4）：hhmm 不是 HH:MM 就清空，否则提醒循环会整轮抛异常
-        for _t in self.tasks:
-            _h = _t.get("hhmm")
-            if _h is not None:
-                try:
-                    _hh, _mm = str(_h).split(":")
-                    if not (0 <= int(_hh) <= 23 and 0 <= int(_mm) <= 59):
-                        raise ValueError
-                except Exception:
-                    _t["hhmm"] = None
-                    _t["deadline_txt"] = None
-        self.messages = _safe(lambda: obj.get("messages", [])[-MSG_KEEP:], []) or []
-        self.topmost = _safe(lambda: bool(obj.get("topmost", True)), True)
+        _lang = _safe(lambda: obj.get("lang", "zh"), "zh")
+        if _lang not in ("zh", "en"):
+            _lang = "zh"
+        self._dirty_fix = False       # v1.9.9.52：清洗改动过数据 → 启动后回写一次
+        self.tasks, _ch = self._sanitize_tasks(
+            _safe(lambda: obj.get("tasks", []), []), _lang)
+        self._dirty_fix = self._dirty_fix or _ch
+        self.messages, _ch = self._sanitize_messages(
+            _safe(lambda: obj.get("messages", []), []))
+        self._dirty_fix = self._dirty_fix or _ch
+        self.topmost = self._to_bool(_safe(lambda: obj.get("topmost", True), True), True)
         self.theme = _safe(lambda: obj.get("theme", palette.DEFAULT_ID),
                            palette.DEFAULT_ID)
-        self.lang = _safe(lambda: obj.get("lang", "zh"), "zh")
-        self.quotes = _safe(lambda: obj.get("quotes"), None) or {
-            "zh": {"last": obj.get("quote_last", ""),
-                   "recent": (obj.get("quote_recent") or [])[-60:]},
-            "en": {"last": "", "recent": []},
-        }
+        if not isinstance(self.theme, str):
+            self.theme = palette.DEFAULT_ID
+        self.lang = _lang
+        # v1.9.9.52：quotes 坏成数字时旧版直接 `or {...}` 兜底失败
+        # （非空数字是真值），随后 self.quotes.setdefault 启动即 AttributeError
+        self.quotes = self._sanitize_quotes(
+            _safe(lambda: obj.get("quotes"), None),
+            _safe(lambda: obj.get("quote_last") or "", ""),
+            _safe(lambda: obj.get("quote_recent") or [], []))
         self.clock_geom = _safe(lambda: obj.get("clock_geom"))
         self.bell_mode = _safe(lambda: obj.get("bell_mode", "chime"), "chime")
-        self.notes = _safe(lambda: [n for n in obj.get("notes", [])
-                                    if isinstance(n, dict)], []) or []
+        self.notes, _ch = self._sanitize_notes(_safe(lambda: obj.get("notes", []), []), _lang)
+        self._dirty_fix = self._dirty_fix or _ch
         self.note_pos = _safe(lambda: obj.get("note_pos"))
         self.note_geom = _safe(lambda: obj.get("note_geom"))
-        self.chat_h = _safe(lambda: obj.get("chat_h"))
-        self.alpha = _safe(lambda: float(obj.get("alpha", 0.95)), 0.95)
+        # v1.9.9.52：聊天区高度是像素值，被写成 "tall" 时 int() 直接抛错，
+        # 启动即崩（脏数据/同步冲突产物）。统一收成 60~600 的整数。
+        _ch = _safe(lambda: obj.get("chat_h"), None)
+        self.chat_h = self._to_num(_ch, 96, 60, 600) if _ch is not None else None
+        # 透明度：必须是有限数并在滑块范围内，否则 save() 里的 round(float(inf))
+        # 会抛 OverflowError，从此每次保存都失败
+        self.alpha = self._to_num(_safe(lambda: obj.get("alpha", 0.95), 0.95),
+                                  0.95, 0.35, 1.0, float)
         self.user_name = _safe(lambda: (obj.get("user_name") or "").strip(), "")
         self.bot_name = _safe(lambda: (obj.get("bot_name") or "").strip(), "")
-        self.setup_stage = _safe(lambda: int(obj.get("setup_stage", 0)), 0)
-        self.bubble_enabled = _safe(lambda: bool(obj.get("bubble_enabled", True)), True)
-        self.bubble_w = _safe(lambda: max(60, min(160, int(obj.get("bubble_w", 84) or 84))), 84)
-        self.font_scale = _safe(lambda: max(0.8, min(1.3, float(obj.get("font_scale", 1.0) or 1.0))), 1.0)
+        self.setup_stage = self._to_num(_safe(lambda: obj.get("setup_stage", 0), 0), 0, 0, 9)
+        self.bubble_enabled = self._to_bool(_safe(lambda: obj.get("bubble_enabled", True), True), True)
+        self.bubble_w = self._to_num(_safe(lambda: obj.get("bubble_w", 84), 84), 84, 60, 160)
+        self.font_scale = self._to_num(_safe(lambda: obj.get("font_scale", 1.0), 1.0),
+                                       1.0, 0.8, 1.3, float)
 
         def _darken():
             td = obj.get("text_darken")
@@ -634,8 +874,25 @@ class Store(object):
                 pass
             return
         days = obj.get("days", {})
+        self._dirty_hist = False
         if isinstance(days, dict):
-            self.history = {k: v for k, v in days.items() if isinstance(v, list)}
+            clean = {}
+            for k, v in days.items():
+                if not isinstance(v, list):
+                    self._dirty_hist = True
+                    continue
+                rows = []
+                for r in v:
+                    if not isinstance(r, dict):
+                        self._dirty_hist = True
+                        continue
+                    if not isinstance(r.get("title"), str):
+                        r = dict(r)
+                        r["title"] = "" if r.get("title") is None else str(r.get("title"))
+                        self._dirty_hist = True
+                    rows.append(r)
+                clean[str(k)] = rows
+            self.history = clean
         # 记下当前签名：内容没变就不该在启动时写盘
         self._hist_last_sig = self._hist_sig(self.history.get(self.today, []))
 
@@ -4451,7 +4708,7 @@ class NoteApp(object):
             new_dl = hhmm
             if due_iso:
                 y2, m2, d2 = due_iso.split("-")
-                new_dl = "%s月%s日 %s" % (int(m2), int(d2), hhmm)
+                new_dl = self._dl_text(due_iso, hhmm)
             task["hhmm"] = hhmm
             task["due_date"] = due_iso
             task["deadline_txt"] = new_dl
@@ -5327,7 +5584,7 @@ class NoteApp(object):
         """撤回 UI 操作（勾选/优先级/删除/改名），v1.9.9.22"""
         if not rec:
             return tr("undo_none")
-        label = rec.get("label") or "上一步操作"
+        label = rec.get("label") or tr("undo_lbl_last")
         if kind == "delete":
             old = rec.get("task")
             if not old:
@@ -5738,11 +5995,7 @@ class NoteApp(object):
             return "%s %s" % (self._repeat_text(rep), _t[0])
         task["due_date"] = (_d[0].isoformat() if _d and _d[0]
                             else task.get("due_date"))
-        task["deadline_txt"] = (task["due_date"] and
-                                "%s %s" % (
-                                    "%d月%d日" % (int(task["due_date"][5:7]),
-                                                 int(task["due_date"][8:10])),
-                                    _t[0])) or _t[0]
+        task["deadline_txt"] = self._dl_text(task["due_date"], _t[0])
         task["_from_raw"] = False
         task["reminded"] = False        # 时间变了，旧提醒作废
         task["reminded_day"] = None
@@ -5779,12 +6032,17 @@ class NoteApp(object):
         if _cancel and len(t) <= 20 and not re.search(
                 r"第\s*(?:[0-9]+|[一二三四五六七八九十]{1,3})\s*[个条项件]", t):
             nm = _cancel.group(1).strip()
+            # v1.9.9.52：「取消完成买牛奶」是**撤销打卡**的意向，旧版按
+            # 「取消 + 买牛奶」当成删除，一条任务直接没了（用户实测丢任务）。
+            # 完成状态只在清单里改，这里给一句引导，绝不动数据。
+            if re.match(r"^(?:完成|打勾|勾选|打卡|签到|标记|标记为|done)", nm, re.I):
+                return True, tr("cancel_done_hint")
             if nm and nm not in ("任务", "待办"):
                 for i, task in enumerate(list(self.store.tasks)):
                     if self._match(nm, task["title"]):
                         self._push_undo({"kind": "delete", "id": task["id"],
                                          "task": dict(task), "index": i,
-                                         "label": "删除【%s】" % task["title"]})
+                                         "label": tr("undo_lbl_delete", t=task["title"])})
                         self.store.tasks.pop(i)
                         self.store.save()
                         self.refresh_tasks()
@@ -5808,12 +6066,12 @@ class NoteApp(object):
                 i = self.store.tasks.index(task)
                 self._push_undo({"kind": "delete", "id": task["id"],
                                  "task": dict(task), "index": i,
-                                 "label": "删除【%s】" % task["title"]})
+                                 "label": tr("undo_lbl_delete", t=task["title"])})
                 self.store.tasks.pop(i)
                 self.store.save()
                 self.refresh_tasks()
                 return True, tr("deleted", title=task["title"])
-            return True, tr("done_notfound", title="第%s个任务" % raw)
+            return True, tr("done_notfound", title=tr("the_nth_task", n=raw))
 
         if pz.DEL_RE.search(t) and parsed:
             target = parsed[0][0]
@@ -6259,7 +6517,7 @@ class NoteApp(object):
             pass
         try:
             self._push_undo({"kind": "note_del", "note": last,
-                             "index": len(notes), "label": "删除便签"})
+                             "index": len(notes), "label": tr("undo_lbl_note")})
         except Exception:
             pass
         try:
@@ -6288,7 +6546,7 @@ class NoteApp(object):
             return
         self.store.notes = [n for n in notes if n["id"] != nid]
         self._push_undo({"kind": "note_del", "note": dict(target),
-                         "index": idx, "label": "删除便签"})
+                         "index": idx, "label": tr("undo_lbl_note")})
         self.store.save()
         self.refresh_notes()
         self.flash(tr("note_deleted_undo"))
@@ -6894,7 +7152,8 @@ class NoteApp(object):
                 self._push_undo({"kind": "done", "id": tid,
                                  "prev": bool(t.get("done")),
                                  "prev_at": t.get("done_at") or "",
-                                 "label": ("取消完成【%s】" if t.get("done") else "勾选完成【%s】") % t.get("title", "")})
+                                 "label": tr("undo_lbl_undone" if t.get("done") else "undo_lbl_done",
+                                              t=t.get("title", ""))})
                 if self._is_daily(t):
                     # v1.9.9.27：日常任务 = 今天打卡（不写历史归档行，
                     # 打卡记录由 _daily_toggle 单独写进当天 history）
@@ -7047,7 +7306,7 @@ class NoteApp(object):
                 self.store.sync_history()
                 self.refresh_tasks()
             return self._praise(tr("done_ok", title=task["title"]))
-        return tr("done_notfound", title="第%s个任务" % raw)
+        return tr("done_notfound", title=tr("the_nth_task", n=raw))
 
     def _is_list_query(self, text):
         """「列表 / 我的任务 / 今天有什么任务 / 看看待办」这类查列表意图
@@ -7269,7 +7528,7 @@ class NoteApp(object):
                                      "prev": _old,
                                      "prev_score": task.get("score"),
                                      "prev_manual": bool(task.get("manual")),
-                                     "label": "改名「%s」→「%s」" % (_old, val)})
+                                     "label": tr("undo_lbl_rename", a=_old, b=val)})
                 task["title"] = val
                 if not task.get("manual"):
                     task["score"] = core.score_task(val, val, task.get("hhmm"))
@@ -7357,7 +7616,7 @@ class NoteApp(object):
                              "prev": _old,
                              "prev_score": target.get("score"),
                              "prev_manual": bool(target.get("manual")),
-                             "label": "改名「%s」→「%s」" % (_old, val)})
+                             "label": tr("undo_lbl_rename", a=_old, b=val)})
             target["title"] = val
             if not target.get("manual"):
                 target["score"] = core.score_task(val, val, target.get("hhmm"))
@@ -7444,7 +7703,7 @@ class NoteApp(object):
                 self._push_undo({"kind": "priority", "id": tid,
                                  "prev_score": t.get("score"),
                                  "prev_manual": bool(t.get("manual")),
-                                 "label": "调整【%s】的优先级" % t.get("title", "")})
+                                 "label": tr("undo_lbl_prio", t=t.get("title", ""))})
                 if score is None:
                     t["score"] = core.score_task(t["title"], t["title"], t.get("hhmm"))
                     t["manual"] = False
@@ -7467,7 +7726,7 @@ class NoteApp(object):
                 self._push_undo({"kind": "delete", "id": tid,
                                  "task": dict(t),
                                  "index": self.store.tasks.index(t),
-                                 "label": "删除【%s】" % t.get("title", "")})
+                                 "label": tr("undo_lbl_delete", t=t.get("title", ""))})
         self.store.tasks = [t for t in self.store.tasks if t["id"] != tid]
         if titles:
             # v1.9.9.45：只清**今天**这条的历史。旧版按标题清所有天——
@@ -9258,7 +9517,7 @@ class NoteApp(object):
             except Exception:
                 pass
             rows.append((day, nt, nh))
-            lb.insert("end", "  %s    %d 条任务 · %d 天历史" % (day, nt, nh))
+            lb.insert("end", "  " + tr("restore_row", d=day, n=nt, h=nh))
         if not rows:
             lb.insert("end", "  " + tr("restore_empty"))
             lb.itemconfig(0, foreground=C.SUB)
@@ -9608,6 +9867,26 @@ class NoteApp(object):
                                 fill="", outline=C.SUB, width=1.2)
 
     @staticmethod
+    def _dl_text(due_iso, hhmm):
+        """截止时间的显示文本：中文「11月9日 08:00」，英文「Nov 9, 08:00」。
+
+        v1.9.9.52：旧版两处都硬写中文格式，英文界面的回复里会出现
+        「11月9日 08:00」这种半截中文。"""
+        if not due_iso:
+            return hhmm or ""
+        try:
+            d = dt.date.fromisoformat(str(due_iso)[:10])
+        except Exception:
+            return hhmm or str(due_iso)
+        if i18n.is_en():
+            base = "%s %d" % (i18n.t("month_names")[d.month - 1], d.day)
+        else:
+            base = "%d月%d日" % (d.month, d.day)
+        if not hhmm:
+            return base
+        return ("%s, %s" if i18n.is_en() else "%s %s") % (base, hhmm)
+
+    @staticmethod
     def _day_label(day, today):
         try:
             d = dt.date.fromisoformat(day)
@@ -9622,7 +9901,8 @@ class NoteApp(object):
                 return tr("day_head_today", md=md, wd=wd)
             if delta == 1:
                 return tr("day_head_yesterday", md=md, wd=wd)
-            return tr("day_head_full", y="%s %d" % (mon, d.year), m=mon, d=d.day, wd=wd)
+            return tr("day_head_full", y=d.year, m=d.month, d=d.day, wd=wd,
+                      md="%s, %d" % (md, d.year))
         week = "一二三四五六日"[d.weekday()]
         md = "%d月%d日" % (d.month, d.day)
         if day == today:

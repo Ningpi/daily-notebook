@@ -89,6 +89,9 @@ STRINGS = {
     # v1.9.9.32：对话不再打勾，引导去清单手动勾
     "checkin_hint": ("打卡不用打字啦——直接在下面清单里点一下方框就行 ✅",
                      "No need to type it — just tick the box in the list below ✅"),
+    # v1.9.9.52：「取消完成X」是撤销打卡的意向，绝不能当删除
+    "cancel_done_hint": ("「取消完成」不在对话里改状态——去清单里把那个勾点掉就行 ✅",
+                         "Unchecking is done in the list — just click that tick ✅"),
     "dup_times_fmt": ("{t}（第{n}次）", "{t} (#{n})"),
     "dup_ask": ("已有相似任务「{title}」。\n"
                 "· 回复【就这个】，我会记成「{new}」\n"
@@ -175,6 +178,18 @@ STRINGS = {
                         "Replace current {n} with the {d} snapshot?"),
     "restore_missing": ("那天没有 {n}", "No {n} in that snapshot"),
     "restore_ok": ("已从 {d} 的备份恢复 {n}。", "Restored {n} from {d}."),
+    # v1.9.9.52：备份列表的行（旧版是写死的中文，英文界面里整列中文）
+    "restore_row": ("{d}    {n} 条任务 · {h} 天历史",
+                    "{d}    {n} tasks · {h} days"),
+    # v1.9.9.52：撤回栈里的操作名（英文界面此前显示「删除【x】」这类中文）
+    "undo_lbl_delete": ("删除【{t}】", "delete \"{t}\""),
+    "undo_lbl_rename": ("改名「{a}」→「{b}」", "rename \"{a}\" to \"{b}\""),
+    "undo_lbl_prio": ("调整【{t}】的优先级", "change priority of \"{t}\""),
+    "undo_lbl_done": ("勾选完成【{t}】", "check \"{t}\""),
+    "undo_lbl_undone": ("取消完成【{t}】", "uncheck \"{t}\""),
+    "undo_lbl_note": ("删除便签", "delete note"),
+    "undo_lbl_last": ("上一步操作", "last step"),
+    "the_nth_task": ("第{n}个任务", "task #{n}"),
     "close": ("关闭", "Close"),
     "note_undo_done": ("已撤回上一条便签", "Last note undone"),
     "note_undo_empty": ("没有可撤回的便签", "No note to undo"),
@@ -269,7 +284,7 @@ STRINGS = {
     "dl_expired_task_kept": ("好的，【{t}】的时间已经过截止日期，先不设这个截止时间，任务已留在待办里。说「撤回」可以撤销刚才的设置。",
                              "That time has passed, so \"{t}\" stays in the list without a deadline. Say \"undo\" to revert."),
     "dl_expired_ask_more": ("【{t}】的时间已经过截止日期咯，是重新说一个时间，还是不用设时间？（可直接回新时间，或回「不用」）",
-                            "That deadline has passed. Give me a new time, or say \"none\" to skip it."),
+                            "\"{t}\" — that deadline has passed. Give me a new time, or say \"none\" to skip it."),
     # 撤回（v1.9.5）
     # P2 问题9：撤回提示与实现一致（v1.9.9.22）
     "undo_none": ("现在没有可撤回的操作。要改时间可以直接说新时间，或右键任务选「编辑内容」。",
@@ -347,7 +362,9 @@ STRINGS = {
     "day_head": ("{md} 周{wd}", "{wd}, {md}"),
     "day_head_today": ("{md} 周{wd} · 今天", "{wd}, {md} · Today"),
     "day_head_yesterday": ("{md} 周{wd} · 昨天", "{wd}, {md} · Yesterday"),
-    "day_head_full": ("{y}年{m}月{d}日 周{wd}", "{wd}, {y}"),
+    # v1.9.9.52：英文模板原来只取 {wd} 和 {y}，日期标题渲染成
+    # "Sunday, Nov 2026"——**日**丢了。改成取 {md}（"Nov 8, 2026"）。
+    "day_head_full": ("{y}年{m}月{d}日 周{wd}", "{wd}, {md}"),
     "month_day": ("{m}月{d}日", "{mon} {d}"),
     "month_names": (["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"],
                     ["Jan", "Feb", "Mar", "Apr", "May", "Jun",

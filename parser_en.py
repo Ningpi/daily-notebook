@@ -77,21 +77,27 @@ def find_time(seg):
     if not day_offset:
         _WD = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
                "friday": 4, "saturday": 5, "sunday": 6}
-        _m = re.search(r"\b(next|this|coming)\s+(%s)\b" % "|".join(_WD), text)
-        if _m:
-            _mode, _wd = _m.group(1), _WD[_m.group(2)]
-            _today_wd = dt.date.today().weekday()
-            if _mode == "this":
+        _WD_PAT = "|".join(_WD)
+        # v1.9.9.52：裸星期几也要认（"pay bill on friday"）。旧版只认
+        # next/this/coming + 星期，用户只说 "on friday" 时日期整个丢失，
+        # 任务被当成「今天」，晚上录入还会被追问「时间已过还加吗」。
+        # 但 every/each + 星期是**周期**任务，不能塞「某一天」，
+        # 否则和中文侧「周期任务不带 due_date」的规则冲突。
+        if re.search(r"\b(?:every|each)\s+(?:single\s+)?(?:%s)s?\b" % _WD_PAT, text):
+            pass
+        else:
+            _m = re.search(r"\b(?:(next|this|coming)\s+)?(%s)\b" % _WD_PAT, text)
+            if _m:
+                _mode, _wd = (_m.group(1) or ""), _WD[_m.group(2)]
+                _today_wd = dt.date.today().weekday()
                 _delta = (_wd - _today_wd) % 7      # 本周内，已过则顺延
-            else:
-                _delta = (_wd - _today_wd) % 7
-                if _delta == 0:
+                if _mode == "next" and _delta == 0:
                     _delta = 7                      # next monday 不含今天
-            day_offset = _delta
-        elif re.search(r"\bnext\s+week\b", text):
-            day_offset = 7
-        elif re.search(r"\bweekend\b", text):
-            day_offset = (5 - dt.date.today().weekday()) % 7   # 本周六，已过则下周六
+                day_offset = _delta
+            elif re.search(r"\bnext\s+week\b", text):
+                day_offset = 7
+            elif re.search(r"\bweekend\b", text):
+                day_offset = (5 - dt.date.today().weekday()) % 7   # 本周六，已过则下周六
 
     now = dt.datetime.now()
     hhmm = None
@@ -162,8 +168,12 @@ def clean(seg):
                r"this evening|morning|afternoon|evening|noon|midday|midnight)\b", " ", t, flags=re.I)
     # v1.9.9.51：相对星期（next monday / this friday / next week）也算时间表达，
     # 旧版不认识就把它们留在标题里，成了「review next Monday」这种半截任务名
-    t = re.sub(r"\b(next|this|coming|on)\s+(monday|tuesday|wednesday|thursday|friday|"
-               r"saturday|sunday|week|weekend)\b", " ", t, flags=re.I)
+    # v1.9.9.52：裸星期几同样要剥（"dinner sunday" -> "dinner"），
+    # 否则标题里挂着星期，用户得自己删。
+    t = re.sub(r"\b(?:(?:next|this|coming|on|every|each)\s+(?:single\s+)?)?"
+               r"(monday|tuesday|wednesday|thursday|friday|"
+               r"saturday|sunday)\b", " ", t, flags=re.I)
+    t = re.sub(r"\b(next|this|coming|on)\s+(week|weekend)\b", " ", t, flags=re.I)
     t = re.sub(r"\b(\d{1,2})\s*o'?clock\b", " ", t, flags=re.I)
     # 时长（for 15 min / 2 hours）：不进标题，只作次要信息
     t = re.sub(r"\b(for|in|within|about|around)\s+\d{1,3}\s*"
