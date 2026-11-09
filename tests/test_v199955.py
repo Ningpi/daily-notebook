@@ -95,20 +95,19 @@ def open_clock_win(a):
 # ------------------------------------------------ 1. 时钟全屏自适应
 
     def test_fullscreen_font_grows(self, app):
+        """v1.9.9.56 改为约占窗口宽 30%：字号仍随窗口变大，只是不再铺满"""
         a = app
         win = open_clock_win(a)
-        # 先小窗
         win.geometry("500x400+30+30")
         a.root.update()
         a._clock_tick_body(win)
         small_fs = a._clock_fs
-        # 放大到全屏量级：旧版上限 120，新版必须显著超过
         win.geometry("1280x960+0+0")
         a.root.update()
         a._clock_tick_body(win)
         big_fs = a._clock_fs
-        assert big_fs > 120, "全屏字号应突破旧版 120 上限（现 %s）" % big_fs
-        assert big_fs > small_fs * 1.5, "最大化后字号应明显变大"
+        assert big_fs > small_fs * 1.5, "窗口变大后字号应明显变大"
+        assert 16 <= big_fs <= 300
 
     def test_shrink_font_falls(self, app):
         a = app
@@ -136,9 +135,9 @@ def open_clock_win(a):
         tw = real.measure("88:88:88")
         lw = a._clock_now.winfo_width()
         lh = a._clock_now.winfo_height()
-        assert tw <= lw * 1.02, "时间宽度不应溢出标签（%d vs %d）" % (tw, lw)
-        assert tw >= lw * 0.85, "时间宽度应基本铺满（%d vs %d，旧版上限只占一半）" % (tw, lw)
-        assert real.metrics("linespace") <= lh * 1.02, "行高不应超出标签"
+        assert tw <= lw * 0.42, "数字宽度应约占窗口 30%%（现 %.0f%%）" % (tw / lw * 100)
+        assert tw >= lw * 0.22, "数字宽度不应过小（现 %.0f%%）" % (tw / lw * 100)
+        assert real.metrics("linespace") <= lh * 0.62, "行高不应超过标签一半太多"
         a._close_clock()
 
     def test_min_floor_16(self, app):

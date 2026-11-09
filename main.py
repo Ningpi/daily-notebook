@@ -27,7 +27,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.55"
+VERSION = "1.9.9.56"
 
 # 单条输入的长度上限（v1.9.9.51）
 # 用户实测贴长文会「少了一大截」甚至卡住，而程序既不提示也不报错。
@@ -7611,6 +7611,15 @@ class NoteApp(object):
         # 时钟窗口的文字在创建时生成，语言变了就重建（几何/计时状态保留）
         cw = getattr(self, "_clock_win", None)
         if cw is not None and cw.winfo_exists():
+            # v1.9.9.56：先记下窗口状态。用户实测「有几次点中英文转换会
+            # 弹出时钟」——时钟窗其实早就开着，只是被最小化（或被别的窗
+            # 盖住）；切语言销毁重建后，置顶窗恢复可见还抢占焦点，看起来
+            # 就像切语言凭空弹出时钟。重建后按原状态还原：最小化的继续
+            # 最小化，焦点还给主窗。
+            try:
+                st = cw.state()
+            except Exception:
+                st = "normal"
             self._save_clock_geom()
             # 先把计时状态存下来（_close_clock 会把控件置空）
             sw_running = self._sw_running
@@ -7636,11 +7645,26 @@ class NoteApp(object):
                     if t["id"] == sw_task:
                         self._link_task(t["id"], t["title"])
                         break
+            # 还原重建前的窗口状态：最小化/隐藏的继续最小化/隐藏
+            cw2 = getattr(self, "_clock_win", None)
+            if cw2 is not None and cw2.winfo_exists():
+                try:
+                    if st == "iconic":
+                        cw2.iconify()
+                    elif st == "withdrawn":
+                        cw2.withdraw()
+                except Exception:
+                    pass
         # v1.9.9.53：日历窗也重建（用户实测问题 16）。日历的「跳到/跳转/
         # 今天/图例」等静态控件在打开时生成，画布重绘虽然跟语言走，但静态
         # 控件不刷新，切语言后就是半中半英。整窗重建，保留几何与当前年月。
         cal = getattr(self, "_cal_win", None)
         if cal is not None and cal.winfo_exists():
+            # v1.9.9.56：同时钟窗——最小化的日历切语言后别自动弹回前台
+            try:
+                cal_st = cal.state()
+            except Exception:
+                cal_st = "normal"
             g = cal.geometry()
             cy, cm = getattr(self, "_cal_y", None), getattr(self, "_cal_m", None)
             cal.destroy()
@@ -7660,9 +7684,18 @@ class NoteApp(object):
                 self._cal_win.geometry(g)
             except Exception:
                 pass
+            if cal_st == "iconic":
+                try:
+                    self._cal_win.iconify()
+                except Exception:
+                    pass
         # v1.9.9.54：「关于」窗开着时切语言，同样整窗重建
         ab = getattr(self, "_about_win", None)
         if ab is not None and ab.winfo_exists():
+            try:
+                ab_st = ab.state()
+            except Exception:
+                ab_st = "normal"
             g = ab.geometry()
             ab.destroy()
             self._about_win = None
@@ -7671,6 +7704,17 @@ class NoteApp(object):
                 self._about_win.geometry(g)
             except Exception:
                 pass
+            if ab_st == "iconic":
+                try:
+                    self._about_win.iconify()
+                except Exception:
+                    pass
+        # v1.9.9.56：焦点还给主窗——重建的 Toplevel 在 Windows 上会抢走
+        # 输入焦点，用户正聊着天键盘突然失灵就是这个原因
+        try:
+            self.root.focus_set()
+        except Exception:
+            pass
         if announce:
             self.flash("Language: English" if code == "en" else "界面已切换到中文")
 
@@ -9131,21 +9175,21 @@ class NoteApp(object):
         lh = now_lbl.winfo_height()
         if lw < 40 or lh < 20:      # 首帧还没布局好，先按窗口估
             lw, lh = win.winfo_width(), max(60, win.winfo_height() - 120)
-        # v1.9.9.55：全屏下时间数字四周大片留白、最大化后字号也不跟着放大
-        # （用户实测）。旧写法按固定系数估算且上限 120——全屏早已顶到上限，
-        # 窗口再大字号也不动。改为用 tkfont 实测「88:88:88」在当前字体下
-        # 的像素宽高，反解出恰好铺满可用区域的字号；上限放到 500（4K 全屏
-        # 也能铺满），四周只留 4%~8% 边距。
+        # v1.9.9.55：用 tkfont 实测「88:88:88」在当前字体下的像素宽高，
+        # 反解出合适字号（旧固定系数估算 + 上限 120 导致全屏不跟随）。
+        # v1.9.9.56：v1.9.9.55 的「铺满」太激进（数字几乎占满窗口宽），
+        # 用户实测改小——数字宽度约占窗口 30%（1/4~1/3 之间），高度上限
+        # 收紧到标签高度一半，上下两边留出空间。
         try:
             f = tkfont.Font(root=now_lbl, family=self.f_ui,
                             size=-100, weight="bold")
             w100 = f.measure("88:88:88")
             h100 = f.metrics("linespace")
-            size = int(min(lw * 0.96 / w100 * 100,
-                           lh * 0.92 / h100 * 100))
+            size = int(min(lw * 0.30 / w100 * 100,
+                           lh * 0.50 / h100 * 100))
         except Exception:
-            size = int(min(lw * 0.60 / 5.2, lh * 0.55 / 1.35))
-        size = max(16, min(500, size))
+            size = int(min(lw * 0.30 / 4.2, lh * 0.50 / 1.2))
+        size = max(16, min(300, size))
         if size != getattr(self, "_clock_fs", 0):
             try:
                 # 用负字号（像素）套用：与上面的像素测量口径一致，
