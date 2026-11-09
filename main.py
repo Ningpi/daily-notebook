@@ -27,7 +27,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.54"
+VERSION = "1.9.9.55"
 
 # 单条输入的长度上限（v1.9.9.51）
 # 用户实测贴长文会「少了一大截」甚至卡住，而程序既不提示也不报错。
@@ -2562,18 +2562,37 @@ class NoteApp(object):
         self._btn_dots(bx, h // 2, self.open_about, C.TEXT)
 
     def _btn_dots(self, x, y, cmd, color):
-        """三个小点按钮：打开「关于」窗（v1.9.9.54）。
+        """「···」三点按钮：打开「关于」窗（v1.9.9.54）。
+
+        v1.9.9.55：按用户提供的 SVG（三个点点-copy.svg）重绘。该 SVG 是
+        1024 视窗里三颗 r≈113.5 的实心圆，圆心间距 329，r/间距≈0.345——
+        按此比例画（旧版 r/间距=0.3，点偏小偏稀）。矢量圆与 SVG 完全同构。
+
+        颜色状态（点击前后有区分）：
+        - 平时：主题字色；
+        - 悬停 / 按下：强调色；
+        - **关于窗开着：保持强调色**（点击后的驻留状态），
+          关掉关于窗后自动还原（open_about 里挂了 Destroy 重绘）。
 
         热区必须**先创建**、圆点后创建（圆点自然叠在上面）。旧写法在循环
         里 tag_lower(hit, d)——每次把热区插到该点下面，三次之后热区反而
         回到所有圆点上方，不透明的热区把三个点全盖住了，界面只剩一个
         小残影。"""
         cv = self.head
+
+        def _active():
+            w = getattr(self, "_about_win", None)
+            return w is not None and bool(w.winfo_exists())
+
+        fill0 = C.ACCENT if _active() else color
         hit = cv.create_rectangle(x - 10, y - 9, x + 10, y + 9,
                                   outline="", fill=C.HEAD)
-        dots = [cv.create_oval(x + dx - 1.8, y - 1.8, x + dx + 1.8, y + 1.8,
-                               fill=color, outline="")
-                for dx in (-6, 0, 6)]
+        dx, r = 6, 2.1               # r/间距 = 0.35，对齐 SVG 比例
+        dots = [cv.create_oval(x + d0 - r, y - r, x + d0 + r, y + r,
+                               fill=fill0, outline="")
+                for d0 in (-dx, 0, dx)]
+        self._dots_items = dots      # open_about 点亮 / draw_head 重绘用
+        self._dots_color = color
         self._hot(dots + [hit], cmd)
 
         def _en(_e=None):
@@ -2581,8 +2600,9 @@ class NoteApp(object):
                 cv.itemconfigure(d, fill=C.ACCENT)
 
         def _le(_e=None):
+            fill = C.ACCENT if _active() else color
             for d in dots:
-                cv.itemconfigure(d, fill=color)
+                cv.itemconfigure(d, fill=fill)
         cv.tag_bind(hit, "<Enter>", _en)
         cv.tag_bind(hit, "<Leave>", _le)
 
@@ -2596,6 +2616,13 @@ class NoteApp(object):
             return
         win = tk.Toplevel(self.root)
         self._about_win = win
+        # v1.9.9.55：点开关于窗的同时把头部「···」点成强调色（点击后的
+        # 驻留状态），关窗时由下面的 Destroy 绑定重绘头部还原
+        try:
+            for d in getattr(self, "_dots_items", []):
+                self.head.itemconfigure(d, fill=C.ACCENT)
+        except Exception:
+            pass
         win.title(tr("about_title"))
         win.configure(bg=C.BG)
         win.geometry("500x560+240+110")
@@ -2636,6 +2663,12 @@ class NoteApp(object):
             win.transient(self.root)
         except Exception:
             pass
+        # v1.9.9.55：关于窗开着时头部「···」按钮保持强调色（点击后的驻留
+        # 状态），关窗后重绘头部还原。子控件销毁也会触发 <Destroy>，
+        # 所以只认 toplevel 自身那次，且用防抖合并多次触发。
+        win.bind("<Destroy>", lambda e: (
+            e.widget is win and
+            self.debounce("aboutdots", self.draw_head, 120)), add="+")
 
     def _btn_lang(self, x, y, color):
         """语言按钮：显示当前语言可切换到的目标（中 / EN）"""
@@ -9098,12 +9131,26 @@ class NoteApp(object):
         lh = now_lbl.winfo_height()
         if lw < 40 or lh < 20:      # 首帧还没布局好，先按窗口估
             lw, lh = win.winfo_width(), max(60, win.winfo_height() - 120)
-        # 四周留白：文字宽约占 60%、高约占 55%
-        size = int(min(lw * 0.60 / 5.2, lh * 0.55 / 1.35))
-        size = max(16, min(120, size))
+        # v1.9.9.55：全屏下时间数字四周大片留白、最大化后字号也不跟着放大
+        # （用户实测）。旧写法按固定系数估算且上限 120——全屏早已顶到上限，
+        # 窗口再大字号也不动。改为用 tkfont 实测「88:88:88」在当前字体下
+        # 的像素宽高，反解出恰好铺满可用区域的字号；上限放到 500（4K 全屏
+        # 也能铺满），四周只留 4%~8% 边距。
+        try:
+            f = tkfont.Font(root=now_lbl, family=self.f_ui,
+                            size=-100, weight="bold")
+            w100 = f.measure("88:88:88")
+            h100 = f.metrics("linespace")
+            size = int(min(lw * 0.96 / w100 * 100,
+                           lh * 0.92 / h100 * 100))
+        except Exception:
+            size = int(min(lw * 0.60 / 5.2, lh * 0.55 / 1.35))
+        size = max(16, min(500, size))
         if size != getattr(self, "_clock_fs", 0):
             try:
-                now_lbl.config(font=(self.f_ui, size, "bold"))
+                # 用负字号（像素）套用：与上面的像素测量口径一致，
+                # Windows 高 DPI 缩放下也能精确铺满
+                now_lbl.config(font=(self.f_ui, -size, "bold"))
                 self._clock_fs = size        # 只在字号变化时才重设，省掉无谓重排
             except Exception:
                 pass
