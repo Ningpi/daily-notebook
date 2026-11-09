@@ -354,6 +354,12 @@ STRINGS = {
     "hist_none_day": ("（这天没有记录）", "(no records)"),
     "day_today": ("今天", "Today"),
     "day_yesterday": ("昨天", "Yesterday"),
+    # v1.9.9.53：便签跨天时间前缀用（前天及更早直接显示 M/D）
+    "day_2ago": ("前天", "2 days ago"),
+    # v1.9.9.53：便签右键「详情」——便签列表只显示一行，长内容以前看不全
+    "menu_detail": ("详情", "Details"),
+    "note_detail_title": ("便签详情", "Note details"),
+    "note_detail_close": ("关闭", "Close"),
 
     # —— 优先级标签（顺序：紧急 / 重要 / 一般 / 不急）
     "prio": (["紧急", "重要", "一般", "不急"], ["Urgent", "Important", "Normal", "Later"]),

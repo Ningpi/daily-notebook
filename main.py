@@ -27,7 +27,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.52"
+VERSION = "1.9.9.53"
 
 # 单条输入的长度上限（v1.9.9.51）
 # 用户实测贴长文会「少了一大截」甚至卡住，而程序既不提示也不报错。
@@ -320,7 +320,9 @@ class Store(object):
         self.bubble_w = 84         # 气泡宽度（拖拽缩放，60~160）
         self.font_scale = 1.0      # 字体缩放（0.8~1.3）
         self.enter_hint_done = False  # 「回车发送」提示已教过（v1.9.9.21）
-        self.text_darken = None    # 手动字体深浅；None=按透明度自动推导
+        # v1.9.9.53：默认深浅 45%（用户实测期望 95% / 100% / 45% 这组默认值；
+        # 旧默认 None=按透明度自动推导，在 95% 透明度下算出来是 0%，字太浅）
+        self.text_darken = 0.45    # 手动字体深浅（0~1；滑块 0~100%）
         self.notes = []
         self.note_pos = None
         self.note_geom = None
@@ -702,7 +704,7 @@ class Store(object):
         def _darken():
             td = obj.get("text_darken")
             if td is None:
-                return None
+                return 0.45        # v1.9.9.53：默认 45%（与初始值一致）
             td = float(td)
             if td > 1.0:                  # 旧版本存 0~45 的百分数
                 td = td / 100.0
@@ -2855,6 +2857,27 @@ class NoteApp(object):
                 pass
         pend[key] = self.root.after(delay, lambda: (pend.pop(key, None), fn()))
 
+    def _watch_canvas_width(self):
+        """v1.9.9.53：画布宽度看门狗（用户实测问题 15）
+
+        聊天气泡按**渲染那一刻**的画布宽度折行。Windows 上快速拖动窗口、
+        系统缩放或最小化还原时，个别 <Configure> 事件会丢，画布变了但
+        重排没触发——气泡还按旧宽度排，文字就冒出气泡框（截图里首句
+        「（比如「你叫我小李吧」）」一路顶到窗口边）。这里每 0.5s 对一眼
+        宽度，发现不一致就补一次重排，兜住所有丢事件的路径。"""
+        cv = getattr(self, "chat_cv", None)
+        if cv is not None and cv.winfo_exists():
+            w = cv.winfo_width()
+            if w > 1 and w != getattr(self, "_chat_last_w", None):
+                self._chat_last_w = w
+                self.debounce("chat", self.render_messages)
+        lv = getattr(self, "list_cv", None)
+        if lv is not None and lv.winfo_exists():
+            w2 = lv.winfo_width()
+            if w2 > 1 and w2 != getattr(self, "_list_last_w", None):
+                self._list_last_w = w2
+                self.debounce("list", self.refresh_tasks)
+
     # ---------------- 黑匣子日志（v1.3.5：改为后台线程异步写）
     # 此前每次 diag 都重新 open 文件——Windows 上杀毒软件扫描时会锁住文件，
     # open() 永久阻塞 → UI 线程卡死 →「未响应」。log 证实卡死都发生在
@@ -3780,6 +3803,7 @@ class NoteApp(object):
         self._chat_offset = offset
         self._chat_total = total
         self._chat_min = min(0, h - total)   # 滚动下限：到最旧一条为止
+        self._chat_last_w = w                # v1.9.9.53：宽度看门狗用
         y = offset + 4
         for role, lines, bw, bh in items:
             if y + bh < -4 or y > h + 4:
@@ -4104,7 +4128,7 @@ class NoteApp(object):
             # 一张写着「撤回」的（QA 实测）。先走撤回意图识别。
             try:
                 if self._undo_re().match(text) or self._undo_intent().match(text):
-                    self._undo_last_note()   # 内部会把内容回填输入框
+                    self._undo_last_note()   # 内部会清空输入框（v1.9.9.53）
                     return "break"
             except Exception:
                 pass
@@ -4244,20 +4268,34 @@ class NoteApp(object):
                        r"(?:掉|了)?\s*", "", (t or "").strip())
 
     @staticmethod
-    def _same_title(a, b):
-        """标题是否指同一件事（去空格、小写后互为子串或相等）"""
-        a = (a or "").replace(" ", "").lower()
-        b = (b or "").replace(" ", "").lower()
-        if not a or not b:
-            return False
-        if a == b or a in b or b in a:
-            return True
-        # v1.9.9.25：剥掉动作词后再比（「取消写周报」≠「写周报」）
-        a2 = NoteApp._strip_action(a)
-        b2 = NoteApp._strip_action(b)
-        if a2 and b2 and a2 != a or b2 != b:
-            return bool(a2 and b2 and (a2 == b2 or a2 in b2 or b2 in a2))
-        return False
+    def _norm_title(t):
+        """v1.9.9.53：相似判定用的标题归一化。
+
+        去空格和标点，反复剥掉动作动词前缀（取消/完成/帮我…）和句尾
+        语气词（吧/了/啊…），剩下的核心词完全一致才算同一件事。"""
+        import re as _re
+        s = (t or "").strip().lower()
+        s = _re.sub(r"[\s，。！？!?\.,;；:：、()（）\[\]【】~～·\"'“”‘’…—-]+", "", s)
+        prev = None
+        while prev != s and s:
+            prev = s
+            s = NoteApp._strip_action(s)
+            s = _re.sub(r"^(?:请|麻烦你?|劳驾|帮我?|帮忙|记得|别忘了)+", "", s)
+            s = _re.sub(r"(?:吧|呢|吗|啊|呀|哦|嘛|噢|喔|么)+$", "", s)
+            s = s.replace("一下", "")          # 交一下周报 ≈ 交周报
+            s = _re.sub(r"[了的]+$", "", s)    # 买牛奶了 ≈ 买牛奶
+        return s
+
+    @classmethod
+    def _same_title(cls, a, b):
+        """标题是否指同一件事。
+
+        v1.9.9.53 加严（用户实测问题 17）：旧版「互为子串就算相似」，
+        已有任务叫「英语」，再输「完成英语作业」「请英语语法句子」都被
+        拦下问相似——其实根本不是一件事。现在归一化后要求核心词完全
+        一致；「一模一样」或只差语气词/客套话（买牛奶 ≈ 买牛奶吧）才判相似。"""
+        na, nb = cls._norm_title(a), cls._norm_title(b)
+        return bool(na) and na == nb
 
     def _find_similar(self, title):
         """找已存在的相似任务标题；没有则 None。完全相同的优先返回。"""
@@ -5959,6 +5997,16 @@ class NoteApp(object):
                 or re.search(r"\b(?:i\s+)?(?:checked?\s+in|check\s*in|"
                              r"done\s+checking\s+in)\b", text or "", re.I):
             return True, tr("checkin_hint")
+        # v1.9.9.53：软完成语（「今天做了背单词 / 已经看了两章书」）——
+        # 旧版靠「相似任务拦截」兜底（标题互为子串就算相似），相似判定
+        # 加严后这条路断了，会建成「做了背单词」这种任务。现在抽任务名、
+        # 匹配得上已有任务就按打卡引导处理，仍然不在对话里打勾。
+        _hit_done, _soft = self._is_done_intent(text, pz)
+        if _hit_done and _soft:
+            _tgt = self._done_target(text, parsed_now, pz)
+            if _tgt and any(self._match(_tgt, t["title"])
+                            for t in self.store.tasks):
+                return True, tr("checkin_hint")
         return False, None
 
     # ---------------- 其余任务操作（v1.9.9.29 重构）
@@ -6470,7 +6518,7 @@ class NoteApp(object):
         """撤回便签页的上一步
 
         v1.9.9.47：便签页说「撤回」以前会被当成新便签贴出去（内容就叫
-        「撤回」），越撤越多。现在删掉最后一条，并把内容回填到输入框。
+        「撤回」），越撤越多。现在删掉最后一条恢复原便签。
         v1.9.9.51：**接上删除栈**。此前 `_del_note` 明明压了 note_del，
         撤回却固定删「最后一条」——删掉 A 再说撤回，实际删的是 B，A 永远
         回不来；便签删空时又回「没有可撤回的便签」（QA 实测）。现在优先
@@ -6495,9 +6543,11 @@ class NoteApp(object):
                 self.store.save()
             except Exception:
                 pass
+            # v1.9.9.53：不再把便签内容回填输入框（用户实测问题 19）——
+            # 回填后用户一按发送就多出一条「111撤回」式的新便签。
+            # 撤回=恢复原便签，输入框清空，随时记下一条。
             try:
                 self.entry.delete(0, "end")
-                self.entry.insert(0, note.get("text", ""))
             except Exception:
                 pass
             try:
@@ -6520,9 +6570,10 @@ class NoteApp(object):
                              "index": len(notes), "label": tr("undo_lbl_note")})
         except Exception:
             pass
+        # v1.9.9.53：同样只清空、不回填（理由同上：回填会让下一条
+        # 便签带上上一条的内容）
         try:
             self.entry.delete(0, "end")
-            self.entry.insert(0, (last or {}).get("text", ""))
         except Exception:
             pass
         try:
@@ -6552,7 +6603,10 @@ class NoteApp(object):
         self.flash(tr("note_deleted_undo"))
 
     def _note_menu(self, e, nid):
-        """便签右键菜单：编辑 / 删除（v1.9.8，与待办一致）"""
+        """便签右键菜单：详情 / 编辑 / 删除（v1.9.9.53 加「详情」：
+
+        便签列表一行高度有限，长内容只能看到开头（用户实测问题 18），
+        右键「详情」弹出完整内容的只读窗口）。"""
         m = tk.Menu(self.root, tearoff=0)
         row_y = None
         cv = self.list_cv
@@ -6560,6 +6614,8 @@ class NoteApp(object):
             if n["id"] == nid:
                 row_y = 2 + n_idx * self.row_height()
                 break
+        m.add_command(label=tr("menu_detail"),
+                      command=lambda: self._note_detail(nid))
         m.add_command(label=tr("menu_edit"),
                       command=lambda: self._edit_note(nid, row_y if row_y is not None else 2))
         m.add_command(label=tr("menu_delete"), command=lambda: self._del_note(nid))
@@ -6567,6 +6623,62 @@ class NoteApp(object):
             m.tk_popup(e.x_root, e.y_root)
         finally:
             m.grab_release()
+
+    def _note_detail(self, nid):
+        """v1.9.9.53：便签详情窗——完整内容，自动换行，可滚动"""
+        note = None
+        for n in (getattr(self.store, "notes", []) or []):
+            if n["id"] == nid:
+                note = n
+                break
+        if note is None:
+            return
+        win = tk.Toplevel(self.root)
+        self._note_detail_win = win
+        win.title(tr("note_detail_title"))
+        win.configure(bg=C.BG)
+        win.geometry("420x320+300+180")
+        win.attributes("-alpha", min(1.0, getattr(self.store, "alpha", 0.95) + 0.04))
+        day = note.get("day") or ""
+        head = ""
+        if day:
+            try:
+                head = self._note_time_text(day, note.get("created", "")) + "\n"
+            except Exception:
+                head = ""
+        txt = tk.Text(win, wrap="word", relief="flat", bd=0,
+                      bg=C.BG, fg=C.TEXT, font=self.f_task,
+                      padx=14, pady=12)
+        # v1.9.9.53：关闭按钮先 pack——Text expand 会吃掉全部剩余空间，
+        # 按钮 pack 在后面就被挤出窗口外（实测截图里按钮看不见）
+        tk.Button(win, text=tr("note_detail_close"), bg=C.ROW2, fg=C.TEXT,
+                  relief="flat", padx=12, pady=2,
+                  command=win.destroy).pack(side="bottom", pady=(0, 10))
+        txt.pack(side="top", fill="both", expand=True)
+        txt.insert("1.0", head + (note.get("text", "") or ""))
+        txt.configure(state="disabled")       # 只读：详情只是看，不改
+        try:
+            win.transient(self.root)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _note_time_text(day, created):
+        """v1.9.9.53：便签的时间列——今天的只显示时分；昨天/前天加前缀；
+        更早直接给日期（M/D）。旧版永远只有时分，隔天看分不清是今天
+        记的还是上周记的。"""
+        today = dt.date.today().isoformat()
+        if not day or day >= today:
+            return created or ""
+        try:
+            diff = (dt.date.today() - dt.date.fromisoformat(day)).days
+        except ValueError:
+            return "%s %s" % (day[5:].replace("-", "/"), created or "")
+        if diff == 1:
+            return "%s %s" % (tr("day_yesterday"), created or "")
+        if diff == 2:
+            return "%s %s" % (tr("day_2ago"), created or "")
+        return "%s/%s %s" % (day[5:7], day[8:10], created or "")
 
     def _note_del_show(self, nid, show):
         """悬停便签行时显示/隐藏该行的「删除」键（v1.9.4）"""
@@ -6658,7 +6770,9 @@ class NoteApp(object):
                                 outline="", tags=("nh_" + nid,))
             cv.create_text(16, y + (rh - 3) / 2, text=txt, anchor="w",
                            font=self.f_task, fill=C.TEXT, tags=("nh_" + nid,))
-            cv.create_text(w - 16, y + (rh - 3) / 2, text=n.get("created", ""),
+            cv.create_text(w - 16, y + (rh - 3) / 2,
+                           text=self._note_time_text(n.get("day", ""),
+                                                     n.get("created", "")),
                            anchor="e", font=self.f_tiny, fill=C.SUB,
                            tags=("nh_" + nid,))
             # 删除键：悬停该行时浮现（自己也挂 nx_ 以便点得到），移开消失
@@ -7409,6 +7523,30 @@ class NoteApp(object):
                     if t["id"] == sw_task:
                         self._link_task(t["id"], t["title"])
                         break
+        # v1.9.9.53：日历窗也重建（用户实测问题 16）。日历的「跳到/跳转/
+        # 今天/图例」等静态控件在打开时生成，画布重绘虽然跟语言走，但静态
+        # 控件不刷新，切语言后就是半中半英。整窗重建，保留几何与当前年月。
+        cal = getattr(self, "_cal_win", None)
+        if cal is not None and cal.winfo_exists():
+            g = cal.geometry()
+            cy, cm = getattr(self, "_cal_y", None), getattr(self, "_cal_m", None)
+            cal.destroy()
+            self._cal_win = None
+            self.open_calendar_view()
+            if cy and cm:
+                self._cal_y, self._cal_m = cy, cm
+                try:
+                    self._cal_ys.delete(0, "end")
+                    self._cal_ys.insert(0, str(cy))
+                    self._cal_ms.delete(0, "end")
+                    self._cal_ms.insert(0, str(cm))
+                    self._draw_calendar()
+                except Exception:
+                    pass
+            try:
+                self._cal_win.geometry(g)
+            except Exception:
+                pass
         if announce:
             self.flash("Language: English" if code == "en" else "界面已切换到中文")
 
@@ -10250,6 +10388,11 @@ def main():
     def cd_bg():
         try:
             app._cd_bg_tick()
+        except Exception:
+            pass
+        # v1.9.9.53：气泡/列表宽度看门狗（Windows 上 Configure 偶发丢失）
+        try:
+            app._watch_canvas_width()
         except Exception:
             pass
         root.after(500, cd_bg)

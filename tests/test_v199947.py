@@ -360,7 +360,9 @@ class TestNoteUndo:
         app.on_send()
         app.root.update()
         assert app.store.notes == [], "便签页说「撤回」又被贴成一条便签"
-        assert app.entry.get() == "去便利店买便利贴", "撤回后内容没回填"
+        # v1.9.9.53：撤回后不再回填输入框（回填会让下一条便签带上上一条
+        # 的内容，用户实测多出「111撤回」式便签），改为清空
+        assert app.entry.get() == "", "撤回后输入框应清空"
 
     def test_normal_note_still_saved(self, app):
         app.list_mode = "note"
