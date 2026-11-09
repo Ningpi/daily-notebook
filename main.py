@@ -27,7 +27,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.56"
+VERSION = "1.9.9.57"
 
 # 单条输入的长度上限（v1.9.9.51）
 # 用户实测贴长文会「少了一大截」甚至卡住，而程序既不提示也不报错。
@@ -9175,26 +9175,17 @@ class NoteApp(object):
         lh = now_lbl.winfo_height()
         if lw < 40 or lh < 20:      # 首帧还没布局好，先按窗口估
             lw, lh = win.winfo_width(), max(60, win.winfo_height() - 120)
-        # v1.9.9.55：用 tkfont 实测「88:88:88」在当前字体下的像素宽高，
-        # 反解出合适字号（旧固定系数估算 + 上限 120 导致全屏不跟随）。
-        # v1.9.9.56：v1.9.9.55 的「铺满」太激进（数字几乎占满窗口宽），
-        # 用户实测改小——数字宽度约占窗口 30%（1/4~1/3 之间），高度上限
-        # 收紧到标签高度一半，上下两边留出空间。
-        try:
-            f = tkfont.Font(root=now_lbl, family=self.f_ui,
-                            size=-100, weight="bold")
-            w100 = f.measure("88:88:88")
-            h100 = f.metrics("linespace")
-            size = int(min(lw * 0.30 / w100 * 100,
-                           lh * 0.50 / h100 * 100))
-        except Exception:
-            size = int(min(lw * 0.30 / 4.2, lh * 0.50 / 1.2))
-        size = max(16, min(300, size))
+        # v1.9.9.57：按用户要求把时钟字号**恢复为 v1.9.9.54 的算法**。
+        # 期间试过两版都不合适：v1.9.9.55 全屏铺满（数字占满整窗，太大）、
+        # v1.9.9.56 收到 30%（全屏又偏小）。v54 的原式按固定系数估算、
+        # 上限 120：窗口小的时候字号跟着变小，全屏时稳定在 120（数字宽约
+        # 占窗口四成左右，四周有留白），是用户认可的样子。
+        # 四周留白：文字宽约占 60%、高约占 55%
+        size = int(min(lw * 0.60 / 5.2, lh * 0.55 / 1.35))
+        size = max(16, min(120, size))
         if size != getattr(self, "_clock_fs", 0):
             try:
-                # 用负字号（像素）套用：与上面的像素测量口径一致，
-                # Windows 高 DPI 缩放下也能精确铺满
-                now_lbl.config(font=(self.f_ui, -size, "bold"))
+                now_lbl.config(font=(self.f_ui, size, "bold"))
                 self._clock_fs = size        # 只在字号变化时才重设，省掉无谓重排
             except Exception:
                 pass

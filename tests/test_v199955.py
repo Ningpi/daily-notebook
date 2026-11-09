@@ -123,8 +123,8 @@ def open_clock_win(a):
         assert small_fs < big_fs
         assert 16 <= small_fs <= 500
 
-    def test_font_is_pixel_sized(self, app):
-        """实测：时间文字宽度应基本铺满标签（旧版 120 上限只有一半左右）"""
+    def test_text_fits_label(self, app):
+        """v1.9.9.57 起品牌字号回到 v54 算法：文字不溢出标签即可"""
         from tkinter import font as tkfont
         a = app
         win = open_clock_win(a)
@@ -135,9 +135,9 @@ def open_clock_win(a):
         tw = real.measure("88:88:88")
         lw = a._clock_now.winfo_width()
         lh = a._clock_now.winfo_height()
-        assert tw <= lw * 0.42, "数字宽度应约占窗口 30%%（现 %.0f%%）" % (tw / lw * 100)
-        assert tw >= lw * 0.22, "数字宽度不应过小（现 %.0f%%）" % (tw / lw * 100)
-        assert real.metrics("linespace") <= lh * 0.62, "行高不应超过标签一半太多"
+        assert tw <= lw * 0.92, "时间宽度不应溢出标签（%d vs %d）" % (tw, lw)
+        assert real.metrics("linespace") <= lh * 1.02, "行高不应超出标签"
+        assert a._clock_fs <= 120
         a._close_clock()
 
     def test_min_floor_16(self, app):

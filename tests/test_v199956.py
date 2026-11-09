@@ -66,50 +66,58 @@ def open_clock_win(a):
     return win
 
 
-# ------------------------------------ 1. 时钟数字约占窗口 30%
-class TestClockSize:
-    def test_width_about_30pct(self, app):
-        from tkinter import font as tkfont
+# ------------------------- 1. 时钟字号恢复 v1.9.9.54 算法
+# v1.9.9.57：用户要求回到 v54 的大小——固定系数估算 + 上限 120。
+# 小窗口字号跟着变小，全屏稳定在 120（不再铺满、也不再是 30%）。
+class TestClockSizeV54:
+    def test_cap_120_fullscreen(self, app):
         a = app
-        for w, h in ((900, 700), (1280, 960)):
-            win = open_clock_win(a)
-            win.geometry("%dx%d+0+0" % (w, h))
-            a.root.update()
-            a._clock_tick_body(win)
-            real = tkfont.Font(font=a._clock_now.cget("font"))
-            tw = real.measure("88:88:88")
-            lw = a._clock_now.winfo_width()
-            ratio = tw / lw
-            assert 0.24 <= ratio <= 0.38, \
-                "%dx%d 下数字宽度应约占窗口 30%%（现 %.0f%%）" % (w, h, ratio * 100)
-            a._close_clock()
-            a.root.update()
+        win = open_clock_win(a)
+        win.geometry("1920x1080+0+0")
+        a.root.update()
+        a._clock_tick_body(win)
+        assert a._clock_fs == 120, "全屏应稳定在上限 120（现 %s）" % a._clock_fs
+        a._close_clock()
 
-    def test_vertical_whitespace(self, app):
-        """行高不超过标签高度一半，上下留白"""
+    def test_width_ratio_v54(self, app):
+        """全屏下数字宽约占窗口三到四成，四周有留白（不是铺满）"""
         from tkinter import font as tkfont
         a = app
         win = open_clock_win(a)
-        win.geometry("1280x960+0+0")
+        win.geometry("1920x1080+0+0")
         a.root.update()
         a._clock_tick_body(win)
         real = tkfont.Font(font=a._clock_now.cget("font"))
-        lh_lbl = a._clock_now.winfo_height()
-        assert real.metrics("linespace") <= lh_lbl * 0.62
+        tw = real.measure("88:88:88")
+        lw = a._clock_now.winfo_width()
+        ratio = tw / lw
+        assert 0.25 <= ratio <= 0.55, \
+            "全屏数字宽度应约占窗口三到四成（现 %.0f%%）" % (ratio * 100)
+        a._close_clock()
 
-    def test_still_scales_with_window(self, app):
-        """缩小窗口字号跟着变小，但不低于 16"""
+    def test_still_scales_small_window(self, app):
+        """小窗口字号跟着变小，且不低于 16"""
         a = app
         win = open_clock_win(a)
-        win.geometry("1280x960+0+0")
+        win.geometry("1920x1080+0+0")
         a.root.update()
         a._clock_tick_body(win)
-        big_fs = a._clock_fs
+        big = a._clock_fs
         win.geometry("360x280+10+10")
         a.root.update()
         a._clock_tick_body(win)
-        assert a._clock_fs < big_fs
+        assert a._clock_fs < big
         assert a._clock_fs >= 16
+        a._close_clock()
+
+    def test_never_exceeds_cap(self, app):
+        a = app
+        win = open_clock_win(a)
+        for w, h in ((780, 620), (1280, 960), (1920, 1080)):
+            win.geometry("%dx%d+0+0" % (w, h))
+            a.root.update()
+            a._clock_tick_body(win)
+            assert a._clock_fs <= 120, "%dx%d 字号不应超过 120" % (w, h)
         a._close_clock()
 
 
