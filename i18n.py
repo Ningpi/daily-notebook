@@ -360,6 +360,62 @@ STRINGS = {
     "menu_detail": ("详情", "Details"),
     "note_detail_title": ("便签详情", "Note details"),
     "note_detail_close": ("关闭", "Close"),
+    # —— v1.9.9.54：标题栏「···」关于窗（用户实测：想有个地方能看到
+    #    软件是什么、怎么用、有什么功能）
+    "about_title": ("关于 · 每日记事本", "About · Daily Note"),
+    "about_sec_intro": ("这是什么", "What is this"),
+    "about_sec_tips": ("使用小技巧", "Tips & tricks"),
+    "about_sec_feat": ("主要功能", "Features"),
+    "about_intro": (
+        "「每日记事本」是一款单机的轻量桌面记事工具：像聊天一样把事情"
+        "说出来，它帮你记成待办、认出时间、盯住提醒。所有数据都保存在"
+        "你自己电脑的数据目录里，不用注册、不用联网。",
+        "Daily Note is a lightweight offline note-taking tool: just say "
+        "things in plain words and it turns them into tasks, picks up the "
+        "times and keeps an eye on reminders. All data stays on your own "
+        "computer — no account, no internet needed."),
+    "about_tips": (
+        "· 直接说「明天下午3点开会」，日期时间自动识别\n"
+        "· 句尾加 A/B/C/D 或「很重要 / 不急」，自动定优先级\n"
+        "· 说「每天背单词」「每周三交周报」，建成自动滚动的日常任务\n"
+        "· 「取消 / 删掉 + 事情名」删除；「把开会改到10点」改时间\n"
+        "· 便签页：右键便签可编辑、看详情、删除；说「撤回」撤销上一步\n"
+        "· 任务行右键改时间、调优先级；点日历上的日子看当天安排\n"
+        "· 语言按钮（EN / 中）随时切换，中英文都能听懂\n"
+        "· 最小化到托盘照样提醒，不会漏事",
+        "· Type \"meeting tomorrow 3pm\" — date and time are picked up\n"
+        "· End with A/B/C/D or \"important / later\" to set priority\n"
+        "· \"gym every day\" / \"report every friday\" become daily tasks\n"
+        "· \"cancel X\" deletes; \"move meeting to 10am\" reschedules\n"
+        "· Notes: right-click a note to edit, view details, or delete;\n"
+        "  say \"undo\" to take back the last step\n"
+        "· Right-click a task row to reschedule or re-prioritize; click\n"
+        "  a day in the calendar to see that day's plan\n"
+        "· The language button in the top-right switches language anytime\n"
+        "· Reminders keep working while minimized to the tray"),
+    "about_features": (
+        "· 聊天式记事：一句话记下多件事，自动拆分\n"
+        "· 待办清单：打卡完成、按优先级排序、一键清理已完成\n"
+        "· 日常任务：每天 / 每周X / 每月X号，做完明天自动回来\n"
+        "· 便签板：随手记想法，跨天保留，时间显示昨天 / 前天\n"
+        "· 准点提醒：截止时间弹卡片 + 铃声，支持提前提醒\n"
+        "· 日历视图：休 / 班标注，当天安排一目了然\n"
+        "· 历史留档：每天的完成记录可回看，可导出 Markdown / JSON / 日历\n"
+        "· 时钟工具：秒表与倒计时\n"
+        "· 个性化：8 套主题配色、透明度、字体大小与深浅、中英双语",
+        "· Chat-style capture: several tasks from one sentence\n"
+        "· To-do list: tick off, sort by priority, clear finished at once\n"
+        "· Daily / weekly / monthly tasks roll over automatically\n"
+        "· Sticky notes for quick thoughts; kept across days with\n"
+        "  yesterday / 2-days-ago time labels\n"
+        "· On-time reminders with popup card and chime, plus lead time\n"
+        "· Calendar view with holidays marked and per-day schedules\n"
+        "· History archive of every day, exportable to Markdown / JSON / ICS\n"
+        "· Clock tools: stopwatch and countdown\n"
+        "· Personalization: 8 themes, opacity, font size & darkness,\n"
+        "  bilingual UI"),
+    "about_ver": ("当前版本 v{v} · 数据保存在本机",
+                  "Version v{v} · All data stays on this computer"),
 
     # —— 优先级标签（顺序：紧急 / 重要 / 一般 / 不急）
     "prio": (["紧急", "重要", "一般", "不急"], ["Urgent", "Important", "Normal", "Later"]),

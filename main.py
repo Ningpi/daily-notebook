@@ -27,7 +27,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.53"
+VERSION = "1.9.9.54"
 
 # 单条输入的长度上限（v1.9.9.51）
 # 用户实测贴长文会「少了一大截」甚至卡住，而程序既不提示也不报错。
@@ -2556,6 +2556,86 @@ class NoteApp(object):
         self._btn_palette(bx, h // 2, self.open_palette, C.TEXT)
         bx -= 24
         self._btn_lang(bx, h // 2, C.TEXT)
+        # v1.9.9.54：语言按钮左边再加一颗「···」——点开「关于」窗，
+        # 介绍软件是什么、使用小技巧、功能列表（用户实测需求）
+        bx -= 22
+        self._btn_dots(bx, h // 2, self.open_about, C.TEXT)
+
+    def _btn_dots(self, x, y, cmd, color):
+        """三个小点按钮：打开「关于」窗（v1.9.9.54）。
+
+        热区必须**先创建**、圆点后创建（圆点自然叠在上面）。旧写法在循环
+        里 tag_lower(hit, d)——每次把热区插到该点下面，三次之后热区反而
+        回到所有圆点上方，不透明的热区把三个点全盖住了，界面只剩一个
+        小残影。"""
+        cv = self.head
+        hit = cv.create_rectangle(x - 10, y - 9, x + 10, y + 9,
+                                  outline="", fill=C.HEAD)
+        dots = [cv.create_oval(x + dx - 1.8, y - 1.8, x + dx + 1.8, y + 1.8,
+                               fill=color, outline="")
+                for dx in (-6, 0, 6)]
+        self._hot(dots + [hit], cmd)
+
+        def _en(_e=None):
+            for d in dots:
+                cv.itemconfigure(d, fill=C.ACCENT)
+
+        def _le(_e=None):
+            for d in dots:
+                cv.itemconfigure(d, fill=color)
+        cv.tag_bind(hit, "<Enter>", _en)
+        cv.tag_bind(hit, "<Leave>", _le)
+
+    def open_about(self):
+        """「关于」窗：软件是什么 / 使用小技巧 / 主要功能（v1.9.9.54）。
+
+        内容较长，只读 Text + 滚动条；标题小节加粗，版本号在页脚。"""
+        win = getattr(self, "_about_win", None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            return
+        win = tk.Toplevel(self.root)
+        self._about_win = win
+        win.title(tr("about_title"))
+        win.configure(bg=C.BG)
+        win.geometry("500x560+240+110")
+        win.attributes("-alpha", min(1.0, getattr(self.store, "alpha", 0.95) + 0.04))
+        body = tk.Frame(win, bg=C.BG)
+        body.pack(fill="both", expand=True)
+        # 关闭按钮先 pack：Text expand 会吃掉全部剩余空间（同便签详情窗）
+        tk.Button(win, text=tr("note_detail_close"), bg=C.ROW2, fg=C.TEXT,
+                  relief="flat", padx=14, pady=2,
+                  command=win.destroy).pack(side="bottom", pady=(0, 10))
+        txt = tk.Text(body, wrap="word", relief="flat", bd=0, bg=C.BG,
+                      fg=C.TEXT, font=self.f_task, padx=18, pady=12,
+                      cursor="arrow")
+        sb = tk.Scrollbar(body, command=txt.yview, width=10,
+                          troughcolor=C.LINE, bg=C.ROW2)
+        txt.configure(yscrollcommand=sb.set, state="disabled")
+        sb.pack(side="right", fill="y")
+        txt.pack(side="left", fill="both", expand=True)
+        txt.tag_configure("h", font=(self.f_ui, 11, "bold"),
+                          foreground=C.ACCENT, spacing1=10, spacing3=4)
+        txt.tag_configure("m", foreground=C.TEXT, font=self.f_task,
+                          lmargin1=6, lmargin2=6, spacing3=2)
+        txt.tag_configure("v", foreground=C.SUB, font=self.f_small)
+
+        def sec(title, body_text):
+            txt.configure(state="normal")
+            txt.insert("end", title + "\n", "h")
+            txt.insert("end", body_text + "\n", "m")
+            txt.configure(state="disabled")
+
+        sec(tr("about_sec_intro"), tr("about_intro"))
+        sec(tr("about_sec_tips"), tr("about_tips"))
+        sec(tr("about_sec_feat"), tr("about_features"))
+        txt.configure(state="normal")
+        txt.insert("end", tr("about_ver", v=VERSION), "v")
+        txt.configure(state="disabled")
+        try:
+            win.transient(self.root)
+        except Exception:
+            pass
 
     def _btn_lang(self, x, y, color):
         """语言按钮：显示当前语言可切换到的目标（中 / EN）"""
@@ -7545,6 +7625,17 @@ class NoteApp(object):
                     pass
             try:
                 self._cal_win.geometry(g)
+            except Exception:
+                pass
+        # v1.9.9.54：「关于」窗开着时切语言，同样整窗重建
+        ab = getattr(self, "_about_win", None)
+        if ab is not None and ab.winfo_exists():
+            g = ab.geometry()
+            ab.destroy()
+            self._about_win = None
+            self.open_about()
+            try:
+                self._about_win.geometry(g)
             except Exception:
                 pass
         if announce:

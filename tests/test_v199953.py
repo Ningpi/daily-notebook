@@ -248,3 +248,52 @@ class TestNotes:
         a.list_mode = "note"
         send(a, "内容" * 500)                 # 1000 字
         assert len(a.store.notes[0]["text"]) == 1000
+
+
+# ------------------------------------------------- 6. v1.9.9.54 关于窗
+class TestAbout:
+    def test_dots_button_and_window(self, app):
+        """标题栏「···」按钮 + 关于窗：三节内容 + 版本号"""
+        a = app
+        a.open_about()
+        a.root.update()
+        win = getattr(a, "_about_win", None)
+        assert win is not None and win.winfo_exists()
+        # 再次点击不重复开窗
+        a.open_about()
+        assert a._about_win is win
+        # 窗里有一个 Text，内容包含三节标题和版本号
+        texts = [w for w in a._about_win.winfo_children()
+                 if isinstance(w, tk.Text)] or \
+                [c for f in a._about_win.winfo_children()
+                 if isinstance(f, tk.Frame)
+                 for c in f.winfo_children() if isinstance(c, tk.Text)]
+        assert texts, "关于窗里没找到正文 Text"
+        content = texts[0].get("1.0", "end")
+        for key in ("about_sec_intro", "about_sec_tips", "about_sec_feat"):
+            assert i18n.t(key) in content, "缺少小节：%s" % i18n.t(key)
+        assert M.VERSION in content, "页脚缺版本号"
+        win.destroy()
+
+    def test_about_bilingual(self, app):
+        a = app
+        i18n.set_lang("en")
+        a.open_about()
+        a.root.update()
+        texts = [c for f in a._about_win.winfo_children()
+                 if isinstance(f, tk.Frame)
+                 for c in f.winfo_children() if isinstance(c, tk.Text)]
+        content = texts[0].get("1.0", "end")
+        assert "What is this" in content and "Features" in content
+        a._about_win.destroy()
+
+    def test_lang_switch_rebuilds_about(self, app):
+        a = app
+        a.open_about()
+        a.root.update()
+        win = a._about_win
+        a.switch_lang("en", announce=False)
+        a.root.update()
+        assert a._about_win is not None and a._about_win is not win
+        assert a._about_win.winfo_exists()
+        a._about_win.destroy()
