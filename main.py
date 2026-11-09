@@ -27,7 +27,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.58"
+VERSION = "1.9.9.59"
 
 # 单条输入的长度上限（v1.9.9.51）
 # 用户实测贴长文会「少了一大截」甚至卡住，而程序既不提示也不报错。
@@ -2228,6 +2228,16 @@ class NoteApp(object):
             else:
                 f.configure(family=self.f_ui, size=px)
             setattr(self, name, f)
+        # v1.9.9.59：字体对象是原地 configure 的——名字不变（font3/font4），
+        # 但所有按 str(spec) 做键的宽度缓存里还存着**旧字号**的测量值。
+        # 换行按旧宽度排、文字用新字号画，字号调大后文字就冲出气泡框
+        # 甚至窗口（用户实测：字体放到最大，文字超出窗口以及气泡框）。
+        # 字号一变，全部清掉，等下次测量按新字号重算。
+        self._width_cache = {}
+        self._charw_cache = {}
+        self._avg_cache = {}
+        self.debounce("chat", self.render_messages)
+        self.debounce("list", self.refresh_tasks)
 
     # ---------------- 骨架
     def build_ui(self):
@@ -2622,7 +2632,7 @@ class NoteApp(object):
         内容较长，只读 Text + 滚动条；标题小节加粗，版本号在页脚。"""
         win = getattr(self, "_about_win", None)
         if win is not None and win.winfo_exists():
-            win.lift()
+            self._popup_raise(win)
             return
         win = tk.Toplevel(self.root)
         self._about_win = win
@@ -2842,6 +2852,19 @@ class NoteApp(object):
             if t.get("done"):
                 done += 1
         return done, total, (done / total if total else 0.0)
+
+    def _today_total(self):
+        """今天该做的事总数（v1.9.9.59）：临时任务全部 + 今天该做的日常。
+        非今天的日常（如每周五的任务在周三）不算——旧版哲言判定把它们
+        也当成「没做完」，今天全做完了哲言也不弹（用户实测）。"""
+        return sum(1 for x in self.store.tasks
+                   if not (self._is_daily(x) and not self._daily_due_today(x)))
+
+    def _today_left(self):
+        """今天还没做完的事数（v1.9.9.59，口径同 _today_total）"""
+        return sum(1 for x in self.store.tasks
+                   if not x.get("done")
+                   and not (self._is_daily(x) and not self._daily_due_today(x)))
 
     def bar_color(self, ratio):
         if ratio >= 1.0:
@@ -3453,7 +3476,9 @@ class NoteApp(object):
         def _mk(lang):
             s = i18n.render("task_done_push", dict(title=task["title"]), lang)
             if all_done:
-                s += " " + i18n.render("task_done_all", dict(n=len(self.store.tasks)), lang)
+                # v1.9.9.59：「今天 x 件全部收工」按今天该做的件数——
+                # 旧版数全量任务，含每周五才做的日常，数字对不上
+                s += " " + i18n.render("task_done_all", dict(n=self._today_total()), lang)
                 if q:
                     s += "\n" + self.fmt_quote(q)
             return s
@@ -3909,15 +3934,36 @@ class NoteApp(object):
             # 只有超过上限才折行，避免短句被塞进一个过大的框
             one = " ".join((text or "").split("\n"))
             natural = self.text_width(one, self.f_chat) + 16
+            f_use = self.f_chat
+            lh = line_h
             if natural <= max_bubble_w:
                 wrapped = text or ""
             else:
                 wrapped = self.wrap_text(text, self.f_chat, max_bubble_w - 16)
             lines = wrapped.split("\n")
-            bh = len(lines) * line_h + 8
-            bw = max([self.text_width(l, self.f_chat) for l in lines] or [30]) + 16
+            # v1.9.9.59：兜底——某行仍超出气泡可用宽度时（一段没有断行
+            # 点的超长串、或极端字体环境），把**这一条气泡**的字号按比例
+            # 缩小到刚好塞进气泡框（字体跟随气泡缩放），不再溢出窗口。
+            try:
+                lw_max = max(self.text_width(l, f_use) for l in lines)
+            except Exception:
+                lw_max = 0
+            if lw_max > max_bubble_w - 16:
+                try:
+                    base = abs(self.real_font(f_use).actual("size")) or 12
+                    shrink = max(0.55, (max_bubble_w - 16) / max(lw_max, 1))
+                    f_use = (self.f_ui, max(8, int(base * shrink)))
+                    wrapped = self.wrap_text(text or "", f_use,
+                                             max_bubble_w - 16)
+                    lines = wrapped.split("\n")
+                    lh = max(15, self.real_font(f_use).metrics("linespace") + 3)
+                except Exception:
+                    f_use = self.f_chat
+                    lh = line_h
+            bh = len(lines) * lh + 8
+            bw = max([self.text_width(l, f_use) for l in lines] or [30]) + 16
             bw = min(max(bw, 36), max_bubble_w)
-            items.append((role, lines, bw, bh))
+            items.append((role, lines, bw, bh, f_use, lh))
         items.reverse()                      # 回到时间正序
 
         total = sum(i[3] + 5 for i in items) + 6
@@ -3928,7 +3974,7 @@ class NoteApp(object):
         self._chat_min = min(0, h - total)   # 滚动下限：到最旧一条为止
         self._chat_last_w = w                # v1.9.9.53：宽度看门狗用
         y = offset + 4
-        for role, lines, bw, bh in items:
+        for role, lines, bw, bh, f_use, lh in items:
             if y + bh < -4 or y > h + 4:
                 y += bh + 5
                 continue
@@ -3941,8 +3987,8 @@ class NoteApp(object):
             round_rect(cv, x1, y, x1 + bw, y + bh, 8, fill=color, outline="#EDE0AE")
             ty = y + 4
             for ln in lines:
-                cv.create_text(x1 + 8, ty, text=ln, anchor="nw", font=self.f_chat, fill=C.TEXT)
-                ty += line_h
+                cv.create_text(x1 + 8, ty, text=ln, anchor="nw", font=f_use, fill=C.TEXT)
+                ty += lh
             y += bh + 5
         self._chat_sb_sync()                 # v1.9.9.38：滑块随内容实时同步
 
@@ -6196,13 +6242,13 @@ class NoteApp(object):
         if not m_adj:
             return False, None
         name, when = m_adj.group(1).strip(), m_adj.group(2).strip()
-        for task in self.store.tasks:
-            if not self._match(name, task["title"]):
-                continue
+        # v1.9.9.59：按「最像」挑任务——不再取第一条子串命中，
+        # 「背英语单词」不再被「英语」抢走
+        task = self._best_task(name)
+        if task is not None:
             dl = self._apply_new_time(task, when)
-            if dl is None:
-                break
-            return True, tr("dl_set", t=task["title"], d=dl)
+            if dl is not None:
+                return True, tr("dl_set", t=task["title"], d=dl)
         return False, None
 
     def _op_delete(self, text, parsed, pz):
@@ -6222,15 +6268,18 @@ class NoteApp(object):
             if re.match(r"^(?:完成|打勾|勾选|打卡|签到|标记|标记为|done)", nm, re.I):
                 return True, tr("cancel_done_hint")
             if nm and nm not in ("任务", "待办"):
-                for i, task in enumerate(list(self.store.tasks)):
-                    if self._match(nm, task["title"]):
-                        self._push_undo({"kind": "delete", "id": task["id"],
-                                         "task": dict(task), "index": i,
-                                         "label": tr("undo_lbl_delete", t=task["title"])})
-                        self.store.tasks.pop(i)
-                        self.store.save()
-                        self.refresh_tasks()
-                        return True, tr("deleted", title=task["title"])
+                # v1.9.9.59：同样按「最像」挑——「删除背英语单词」不能把
+                # 先遍历到的「英语」删了（数据丢失比改错时间更严重）
+                task = self._best_task(nm)
+                if task is not None:
+                    i = self.store.tasks.index(task)
+                    self._push_undo({"kind": "delete", "id": task["id"],
+                                     "task": dict(task), "index": i,
+                                     "label": tr("undo_lbl_delete", t=task["title"])})
+                    self.store.tasks.pop(i)
+                    self.store.save()
+                    self.refresh_tasks()
+                    return True, tr("deleted", title=task["title"])
                 # 删不掉也要有回应，别掉进「新建任务」
                 if re.match(r"^[\s，,]*(?:删掉|删了|删除|删|去掉|移除|干掉)", t):
                     return True, tr("done_notfound", title=nm)
@@ -6769,6 +6818,11 @@ class NoteApp(object):
                 break
         if note is None:
             return
+        # v1.9.9.59：详情窗已开着就置顶复用，不再叠一个新窗
+        old = getattr(self, "_note_detail_win", None)
+        if old is not None and old.winfo_exists():
+            self._popup_raise(old)
+            return
         win = tk.Toplevel(self.root)
         self._note_detail_win = win
         win.title(tr("note_detail_title"))
@@ -6779,7 +6833,7 @@ class NoteApp(object):
         head = ""
         if day:
             try:
-                head = self._note_time_text(day, note.get("created", "")) + "\n"
+                head = self._note_time_text(day, note.get("created", ""))
             except Exception:
                 head = ""
         txt = tk.Text(win, wrap="word", relief="flat", bd=0,
@@ -6787,12 +6841,39 @@ class NoteApp(object):
                       padx=14, pady=12)
         # v1.9.9.53：关闭按钮先 pack——Text expand 会吃掉全部剩余空间，
         # 按钮 pack 在后面就被挤出窗口外（实测截图里按钮看不见）
-        tk.Button(win, text=tr("note_detail_close"), bg=C.ROW2, fg=C.TEXT,
+        # v1.9.9.59：底部一排两个按钮——「修改内容」（点击后变编辑态，
+        # 再点「保存」写回）和「关闭」。用户要求能对便签全文局部修改。
+        btn_row = tk.Frame(win, bg=C.BG)
+        btn_row.pack(side="bottom", pady=(0, 10))
+
+        def _save_edit():
+            note["text"] = txt.get("1.0", "end").rstrip("\n")
+            self.store.save()
+            self.refresh_tasks()          # 便签页开着时同步刷新
+            self.flash(tr("note_edit_saved"))
+            win.destroy()
+
+        def _start_edit():
+            edit_btn.config(text=tr("note_detail_save"), command=_save_edit)
+            txt.configure(state="normal")
+            txt.focus_set()
+            txt.mark_set("insert", "end")
+
+        edit_btn = tk.Button(btn_row, text=tr("note_detail_edit"), bg=C.ROW2,
+                             fg=C.TEXT, relief="flat", padx=12, pady=2,
+                             command=_start_edit)
+        edit_btn.pack(side="left", padx=4)
+        tk.Button(btn_row, text=tr("note_detail_close"), bg=C.ROW2, fg=C.TEXT,
                   relief="flat", padx=12, pady=2,
-                  command=win.destroy).pack(side="bottom", pady=(0, 10))
+                  command=win.destroy).pack(side="left", padx=4)
+        # 时间行单独放上面的小标签——不进 Text，保存时才不会把时间写进正文
+        if head:
+            tk.Label(win, text=head, bg=C.BG, fg=C.SUB, font=self.f_small,
+                     anchor="w").pack(side="top", fill="x", padx=14,
+                                      pady=(10, 0))
         txt.pack(side="top", fill="both", expand=True)
-        txt.insert("1.0", head + (note.get("text", "") or ""))
-        txt.configure(state="disabled")       # 只读：详情只是看，不改
+        txt.insert("1.0", note.get("text", "") or "")
+        txt.configure(state="disabled")       # 默认只读，点「修改内容」才放开
         try:
             win.transient(self.root)
         except Exception:
@@ -6981,11 +7062,17 @@ class NoteApp(object):
         total = 0
         y = 2
         k = 0
+        # v1.9.9.59：记录每行的真实 y（含组头高度）——右键「编辑内容」
+        # 旧版用 sorted_tasks() 重算 y，没把组头算进去，编辑框错位到
+        # 另一行上，改名甚至改到别人的任务（用户实测：改「背英语单词」
+        # 结果改了「数学」）
+        self._row_y = {}
         for gi, (gname, items) in enumerate(groups):
             # 组头：日常 / 临时 / 已完成（只有多组时才画，单组保持清爽）
             if len(groups) > 1:
                 y = self._draw_group_head(cv, y, w, gname, items)
             for _idx, t in items:
+                self._row_y[t.get("id")] = y
                 self.draw_row(cv, y, w, rh, t, k,
                               fits[k] if k < len(fits) else True,
                               avail=avails[k] if k < len(avails) else None)
@@ -7015,12 +7102,23 @@ class NoteApp(object):
 
     def _draw_empty_hint(self, cv, w, hint=None):
         """空列表提示 + 「记一条」按钮（v1.9.9.20）
-        v1.9.9.46：便签空态复用（用户实测问题 8：便签页空着什么都不显示）"""
+        v1.9.9.46：便签空态复用（用户实测问题 8：便签页空着什么都不显示）
+        v1.9.9.59：整块（文字+按钮）按可视区高度**真正居中**，窗口缩放
+        实时跟随；旧版顶部固定留白，窗口一矮文字/按钮就被底栏遮住。"""
         try:
             ch = cv.winfo_height()
             if ch < 60:                 # 首帧还没布局好，按窗口高度估
                 ch = max(120, self.root.winfo_height() - 160)
-            cy = max(60, ch // 2 - 30)
+            # 空态不需要滚动：滚动区钉在可视高度、视口回顶，
+            # 之前残留的滚动位置会把整块顶出可视区（实测按钮被底栏遮半截）
+            try:
+                cv.config(scrollregion=(0, 0, w, ch))
+                cv.yview_moveto(0)
+            except Exception:
+                pass
+            # 文字一行(~16px) + 间距 22 + 按钮 26 ≈ 64px 的整块，垂直居中
+            top = max(0, ch // 2 - 32)
+            cy = top + 8
             cv.create_text(w / 2, cy, text=hint or tr("empty_hint"),
                            fill=C.SUB, font=self.f_small, anchor="center")
             bw, bh = 96, 26
@@ -7442,11 +7540,12 @@ class NoteApp(object):
                 self._daily_streak = None
                 # v1.9.9.36：日常打卡也要看「今日是否全部完成」——
                 # 原来直接 return，最后一件是日常时哲言永远不弹
-                left = len([x for x in self.store.tasks if not x.get("done")])
-                if left == 0:
+                # v1.9.9.59：按「今日该做的」口径——非今天的日常不再挡哲言
+                if self._today_left() == 0:
                     self.quote_on_complete(task, 0)
                 return
-            left = len([x for x in self.store.tasks if not x.get("done")])
+            # v1.9.9.59：同上，left 只数今天该做的
+            left = self._today_left()
             q = self.quote_on_complete(task, left)
             if q:
                 self.push("bot", q)
@@ -7634,6 +7733,35 @@ class NoteApp(object):
         """目标文本与任务标题是否指同一件事（大小写无关）"""
         a, b = (target or "").lower(), (title or "").lower()
         return bool(a) and bool(b) and (a in b or b in a)
+
+    def _best_task(self, name):
+        """在所有任务里挑「最像 name」的一条（v1.9.9.59）。
+
+        旧逻辑按 tasks 顺序取第一条 `_match` 命中——「背英语单词的时间
+        改为每天早上八点」会先撞上「英语」就把**英语**改了，用户要改的
+        「背英语单词」原地不动（用户实测）。匹配优先级：
+        完全同名 > 互为包含（标题更长/更具体者优先）> 相似判定兜底。"""
+        name = (name or "").strip()
+        if not name:
+            return None
+        nl = name.lower()
+        exact, contains = [], []
+        for t in self.store.tasks:
+            title = (t.get("title") or "").strip()
+            tl = title.lower()
+            if not tl:
+                continue
+            if tl == nl:
+                exact.append(t)
+            elif nl in tl or tl in nl:
+                contains.append(t)
+            elif self._same_title(name, title):
+                contains.append(t)
+        if exact:
+            return exact[0]
+        if contains:
+            return max(contains, key=lambda t: len(t.get("title") or ""))
+        return None
 
     def toggle_lang(self):
         new = "en" if not i18n.is_en() else "zh"
@@ -7986,16 +8114,20 @@ class NoteApp(object):
         m.add_command(label=tr("menu_time"),
                       command=lambda: self._menu_time(tid))
         # 手动调整优先级
-        sub = tk.Menu(m, tearoff=0)
-        for lv in (4, 3, 2, 1):
-            label = core.priority_label(lv * 25 - 5)[0]
-            # 只显示档位名，不再带分数（v1.9.5）
-            sub.add_command(label=label,
-                            command=lambda s=lv * 25 - 5: self.set_priority(tid, s))
-        if task is not None and task.get("manual"):
-            sub.add_separator()
-            sub.add_command(label=tr("menu_auto"), command=lambda: self.set_priority(tid, None))
-        m.add_cascade(label=tr("menu_priority"), menu=sub)
+        # v1.9.9.59：日常任务不参与优先级（详情窗 v1.9.9.48 起就不显示），
+        # 右键菜单里的「调整优先级」也去掉——日常就是固定的青色竖条
+        is_daily = task is not None and self._is_daily(task)
+        if not is_daily:
+            sub = tk.Menu(m, tearoff=0)
+            for lv in (4, 3, 2, 1):
+                label = core.priority_label(lv * 25 - 5)[0]
+                # 只显示档位名，不再带分数（v1.9.5）
+                sub.add_command(label=label,
+                                command=lambda s=lv * 25 - 5: self.set_priority(tid, s))
+            if task is not None and task.get("manual"):
+                sub.add_separator()
+                sub.add_command(label=tr("menu_auto"), command=lambda: self.set_priority(tid, None))
+            m.add_cascade(label=tr("menu_priority"), menu=sub)
         m.add_separator()
         m.add_command(label=tr("menu_delete"), command=lambda: self.delete_task(tid))
         try:
@@ -8028,14 +8160,26 @@ class NoteApp(object):
             self.flash(tr("dl_set", t=task["title"], d=dl))
 
     def _menu_edit(self, tid):
-        """右键「编辑内容」：定位到该行并打开行内编辑框"""
+        """右键「编辑内容」：定位到该行并打开行内编辑框
+
+        v1.9.9.59：y 直接取 refresh_tasks 画行时记录的真实坐标
+        （self._row_y）——旧版按 sorted_tasks() 重算，漏了组头高度，
+        编辑框错位到别的行，改名作用到了错误任务（用户实测）。"""
+        y = getattr(self, "_row_y", {}).get(tid)
+        if y is not None:
+            self.begin_edit(tid, y)
+            return
+        # 兜底：列表还没渲染过（理论少见）就按分组顺序估算
         y = 2
-        # sorted_tasks() 返回 [(原索引, 任务dict), ...]，第二个才是任务本身
-        for _idx, _orig, t in [(i, o, tk) for i, (o, tk) in enumerate(self.sorted_tasks())]:
-            if t.get("id") == tid:
-                self.begin_edit(tid, y)
-                return
-            y += self.row_height()
+        groups = self.list_groups()
+        for gi, (_g, items) in enumerate(groups):
+            if len(groups) > 1:
+                y += 20          # 组头高度，与 _draw_group_head 一致
+            for _idx, t in items:
+                if t.get("id") == tid:
+                    self.begin_edit(tid, y)
+                    return
+                y += self.row_height()
 
     def set_priority(self, tid, score):
         """手动设定或恢复（score=None）优先级；手动的不会被后续自动打分覆盖"""
@@ -8147,7 +8291,15 @@ class NoteApp(object):
     def open_clock(self):
         win = getattr(self, "_clock_win", None)
         if win is not None and win.winfo_exists():
-            # 关闭：计时状态要留住（倒计时转后台心跳继续跑）
+            # v1.9.9.59：时钟最小化/被盖住时，再点一次是「唤回来」，
+            # 不是关掉——旧版直接 _close_clock，用户以为点了没反应
+            try:
+                if win.wm_state() == "iconic" or not win.winfo_viewable():
+                    self._popup_raise(win)
+                    return
+            except Exception:
+                pass
+            # 可见状态下再点：关闭（计时状态要留住，倒计时转后台心跳继续跑）
             self._close_clock()
             return
         win = tk.Toplevel(self.root)
@@ -8526,8 +8678,8 @@ class NoteApp(object):
         self.push_dual("bot", _sw(lg), _sw("en" if lg == "zh" else "zh"))
         # v1.9.9.33：与中文版口径统一——哲言不再每完成一件就发，
         # 今日任务全部完成才补一句（英文版实测反馈）
-        left = len([x for x in self.store.tasks if not x.get("done")])
-        if left == 0:
+        # v1.9.9.59：left 只数今天该做的（非今天日常不挡哲言）
+        if self._today_left() == 0:
             q = self.draw_quote()
             if q:
                 self.push("bot", self.fmt_quote(q))
@@ -9263,7 +9415,7 @@ class NoteApp(object):
     def open_calendar_view(self):
         win = getattr(self, "_cal_win", None)
         if win is not None and win.winfo_exists():
-            win.lift()
+            self._popup_raise(win)
             return
         win = tk.Toplevel(self.root)
         self._cal_win = win
@@ -9554,10 +9706,39 @@ class NoteApp(object):
     # 主窗口只放「今天该做的」日常，非今天的（每周一的任务）去哪看？
     # 这里集中放全部日常任务：频率、时间、连续天数一目了然，
     # 点任意一条进详情页改时间 / 改频率 / 删除。
+    def _popup_raise(self, win):
+        """v1.9.9.59：已开的弹出窗再次点底栏按钮时——最小化的还原、
+        被别的窗口盖住的置顶抢焦点。旧版只 lift()（同一父窗口内排序，
+        Windows 上几乎看不出效果），最小化的窗口点了毫无反应（用户实测：
+        日常窗最小化后再点「日常」没反应）。"""
+        try:
+            if not win.winfo_exists():
+                return
+            try:
+                # iconic = 最小化；withdrawn = 隐藏（时钟后台心跳、程序自己藏的）
+                if win.wm_state() in ("iconic", "withdrawn"):
+                    win.deiconify()
+            except Exception:
+                pass
+            win.lift()
+            # 短暂 topmost 抢一下层级，随后交还，不做常驻置顶
+            try:
+                win.attributes("-topmost", True)
+                win.after(150, lambda: win.winfo_exists() and
+                          win.attributes("-topmost", False))
+            except Exception:
+                pass
+            try:
+                win.focus_force()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def open_daily_manager(self):
         win = getattr(self, "_dmgr_win", None)
         if win is not None and win.winfo_exists():
-            win.lift()
+            self._popup_raise(win)
             self._render_daily_manager()
             return
         win = tk.Toplevel(self.root)
@@ -9708,7 +9889,7 @@ class NoteApp(object):
         self.store.sync_history()
         win = self._hist_win
         if win is not None and win.winfo_exists():
-            win.lift()
+            self._popup_raise(win)
             self._render_history()
             return
 

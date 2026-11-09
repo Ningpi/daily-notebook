@@ -364,6 +364,10 @@ STRINGS = {
     "menu_detail": ("详情", "Details"),
     "note_detail_title": ("便签详情", "Note details"),
     "note_detail_close": ("关闭", "Close"),
+    # v1.9.9.59：详情窗里的「修改内容 / 保存」
+    "note_detail_edit": ("修改内容", "Edit"),
+    "note_detail_save": ("保存", "Save"),
+    "note_edit_saved": ("便签已更新 ✅", "Note updated ✅"),
     # —— v1.9.9.54：标题栏「···」关于窗（用户实测：想有个地方能看到
     #    软件是什么、怎么用、有什么功能）
     "about_title": ("关于 · 每日记事本", "About · Daily Note"),
