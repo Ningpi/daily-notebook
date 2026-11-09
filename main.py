@@ -27,7 +27,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.57"
+VERSION = "1.9.9.58"
 
 # 单条输入的长度上限（v1.9.9.51）
 # 用户实测贴长文会「少了一大截」甚至卡住，而程序既不提示也不报错。
@@ -705,11 +705,21 @@ class Store(object):
             td = obj.get("text_darken")
             if td is None:
                 return 0.45        # v1.9.9.53：默认 45%（与初始值一致）
-            td = float(td)
+            if isinstance(td, bool):   # true/false 会被 float() 当成 1/0，不合法
+                return 0.45
+            try:
+                td = float(td)
+            except (TypeError, ValueError):
+                # v1.9.9.58：脏值（"深"、[45]、{} 等）不能让设置在加载时
+                # 落成 None——那样会退回「按透明度推导」，95% 透明下算成
+                # 0%，字淡得看不见（v1.9.9.53 修过的老毛病又会被引回来）
+                return 0.45
+            if td != td:                  # NaN
+                return 0.45
             if td > 1.0:                  # 旧版本存 0~45 的百分数
                 td = td / 100.0
             return max(0.0, min(1.0, td))
-        self.text_darken = _safe(_darken, None)
+        self.text_darken = _safe(_darken, 0.45)
         # v1.8.1 起不再问助手名：停留在旧阶段 2 的直接视为完成
         if self.setup_stage >= 2:
             self.setup_stage = 3
@@ -6120,6 +6130,19 @@ class NoteApp(object):
             if _tgt and any(self._match(_tgt, t["title"])
                             for t in self.store.tasks):
                 return True, tr("checkin_hint")
+        # v1.9.9.58：完成语 + 已有同名未完成任务 = 用户其实想打卡。
+        # 对话打勾已被否掉（v1.9.9.32 用户实测「很乱」），但也不能放任它
+        # 变成「完成开会（第2次）」这种重复任务——相似拦截会这么问，
+        # 用户点了「就这个」清单里就多一条几乎一样的活（本轮完整测试发现）。
+        # 折中：不建任务、也不替用户打勾，只回一句在清单里怎么勾。
+        if re.search(pz.DONE_RE, text or ""):
+            _tgt2 = self._done_target(text, parsed_now, pz)
+            if _tgt2:
+                for _t2 in self.store.tasks:
+                    if _t2.get("done"):
+                        continue
+                    if self._same_title(_tgt2, _t2.get("title", "")):
+                        return True, tr("done_hint_where", t=_t2["title"])
         return False, None
 
     # ---------------- 其余任务操作（v1.9.9.29 重构）
@@ -6925,6 +6948,19 @@ class NoteApp(object):
         if getattr(self, "list_mode", "task") == "note":
             return self.refresh_notes()
         cv = self.list_cv
+        # v1.9.9.58：任务缺 title（手改 JSON、旧数据、插件写坏）时，渲染层
+        # 直接 task["title"] 会 KeyError，整张列表白屏。入口统一补全一次。
+        # 必须放在 sync_history 之前——它内部也要遍历 tasks 调 .get()，
+        # 混进非 dict（字符串）时先崩在那儿，后面的兜底根本轮不到。
+        try:
+            self.store.tasks = [t for t in self.store.tasks if isinstance(t, dict)]
+            for _t in self.store.tasks:
+                if not isinstance(_t.get("title"), str):
+                    _t["title"] = ""
+                if not _t.get("id"):
+                    _t["id"] = "f%d" % id(_t)
+        except Exception:
+            pass
         self.store.sync_history()
         cv.delete("all")
         self._long_titles = {}      # v1.9.9.20：本屏被截断的标题（悬停提示用）
@@ -7148,7 +7184,7 @@ class NoteApp(object):
                                  else (C.SUB if done else (C_DAILY if daily else color))))
         # 标题
         fnt = self.f_task
-        title = task["title"]
+        title = task.get("title") or ""
         if avail is None:
             avail = max(24, w - tx - 46 - dw)
         if not title_fits:
@@ -7158,7 +7194,7 @@ class NoteApp(object):
                        tags=("t_" + tid,))
         # v1.9.9.20：标题被截断时，悬停显示完整内容
         if not title_fits:
-            self._long_titles[tid] = task["title"].replace("\n", " ")
+            self._long_titles[tid] = (task.get("title") or "").replace("\n", " ")
         if done:
             tw = self.text_width(title, fnt)
             cv.create_line(tx, y + rh / 2 + 1, tx + tw, y + rh // 2 + 1,

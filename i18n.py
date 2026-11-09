@@ -92,6 +92,10 @@ STRINGS = {
     # v1.9.9.52：「取消完成X」是撤销打卡的意向，绝不能当删除
     "cancel_done_hint": ("「取消完成」不在对话里改状态——去清单里把那个勾点掉就行 ✅",
                          "Unchecking is done in the list — just click that tick ✅"),
+    # v1.9.9.58：「完成开会」而清单里正有未完成的「开会」——不重复建任务，
+    # 也不擅自打勾，只指路
+    "done_hint_where": ("【{t}】还没勾上～在下面清单里点它左边的方框就能勾掉",
+                        "【{t}】 is still open — tick the box on its left below"),
     "dup_times_fmt": ("{t}（第{n}次）", "{t} (#{n})"),
     "dup_ask": ("已有相似任务「{title}」。\n"
                 "· 回复【就这个】，我会记成「{new}」\n"
