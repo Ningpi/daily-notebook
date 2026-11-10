@@ -312,8 +312,8 @@ def test_quit_aborts_when_save_failed(app, monkeypatch):
     a.store.save = bad_save
     try:
         M.Store._save_error = "disk full"
-        import tkinter.messagebox as mb
-        monkeypatch.setattr(mb, "askyesno", lambda *x, **k: False)
+        # v1.9.9.60：确认框改为自绘（原生 messagebox 不跟随置顶）
+        monkeypatch.setattr(M.NoteApp, "_ask_yesno", lambda *x, **k: False)
         a.root.destroy = lambda: (_ for _ in ()).throw(AssertionError("不该销毁窗口"))
         a.quit()
         assert a._closing is False

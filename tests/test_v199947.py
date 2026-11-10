@@ -226,8 +226,8 @@ class TestQuitOrder:
                                    "update_tip": lambda s, x: None})()
         app._closing = False
         app.root.after(5000, lambda: None)          # 一个活着的定时器
-        import tkinter.messagebox as mb
-        monkeypatch.setattr(mb, "askyesno", lambda *a, **k: False)
+        # v1.9.9.60：确认框改为自绘（原生 messagebox 不跟随置顶）
+        monkeypatch.setattr(M.NoteApp, "_ask_yesno", lambda *a, **k: False)
         app.quit()
         app.root.update()
         assert app._closing is False, "取消退出后 _closing 没复位"
@@ -242,8 +242,7 @@ class TestQuitOrder:
         app._tray = type("T", (), {"stop": lambda s: stopped.append(1),
                                    "available": True,
                                    "update_tip": lambda s, x: None})()
-        import tkinter.messagebox as mb
-        monkeypatch.setattr(mb, "askyesno", lambda *a, **k: True)
+        monkeypatch.setattr(M.NoteApp, "_ask_yesno", lambda *a, **k: True)
         app.quit()
         assert stopped, "确认退出却没停托盘"
 
@@ -255,15 +254,17 @@ class TestNormalizeImport:
                {"title": "写报告", "score": "abc",        # score 非数字
                 "hhmm": "8点"},                           # hhmm 非法
                {"title": 123},                            # 非字符串标题
-               {"no_title": 1},                           # 没标题 → 丢弃
-               "not a dict"]
+               {"no_title": 1},                           # 没标题 → 占位保留
+               "not a dict"]                              # 非字典 → 丢弃
         out = M.normalize_tasks(raw)
-        assert len(out) == 3, out
+        # v1.9.9.60：空标题不再静默丢弃（给占位名），否则导入条数对不上账
+        assert len(out) == 4, out
         assert all(t["id"] for t in out), "有任务没补上 id"
-        assert len({t["id"] for t in out}) == 3, "id 重复"
+        assert len({t["id"] for t in out}) == 4, "id 重复"
         assert out[1]["score"] == 30
         assert out[1]["hhmm"] is None
         assert out[2]["title"] == "123"
+        assert out[3]["title"].strip() != "", "空标题应给占位名"
 
     def test_normalized_tasks_are_deletable(self, app):
         app.store.tasks = M.normalize_tasks([{"title": "买牛奶"}])
@@ -295,8 +296,7 @@ class TestBackupRestore:
 
         app.store.tasks = [_task(app, "现在的任务")]
         app.store.save()
-        import tkinter.messagebox as mb
-        monkeypatch.setattr(mb, "askyesno", lambda *a, **k: True)
+        monkeypatch.setattr(M.NoteApp, "_ask_yesno", lambda *a, **k: True)
         app._restore_snapshot(snap_day, "tasks")
         assert [x["title"] for x in app.store.tasks] == ["旧任务"]
         # 恢复前必须把当前文件另存一份
@@ -312,8 +312,7 @@ class TestBackupRestore:
             json.dump({"days": {"2025-01-02": [
                 {"title": "历史里的任务", "score": 30, "done": True}]}},
                 f, ensure_ascii=False)
-        import tkinter.messagebox as mb
-        monkeypatch.setattr(mb, "askyesno", lambda *a, **k: True)
+        monkeypatch.setattr(M.NoteApp, "_ask_yesno", lambda *a, **k: True)
         app._restore_snapshot("2025-01-02", "history")
         assert app.store.history["2025-01-02"][0]["title"] == "历史里的任务"
 
