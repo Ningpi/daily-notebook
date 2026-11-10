@@ -105,7 +105,7 @@ python main.py
 
 ```
 每日记事本/
-├── main.py            # 主程序：UI、对话流程、状态机（约 10400 行）
+├── main.py            # 主程序：UI、对话流程、状态机（约 11000 行）
 ├── parser.py          # 中文自然语言解析：时间 / 日期 / 时长 / 优先级 / 重复
 ├── parser_en.py       # 英文解析器
 ├── i18n.py            # 中英双语文案表
@@ -113,7 +113,7 @@ python main.py
 ├── quotes.py          # 底部哲言库
 ├── holidays.py        # 节假日数据（日历用）
 ├── assets/            # 图标（ico / png）
-├── tests/             # pytest 自动化测试（667 个用例）
+├── tests/             # pytest 自动化测试（707 个用例）
 ├── 使用说明.md         # 完整使用手册 + 逐版本更新日志
 ├── 打包.bat           # Windows 一键打包脚本
 └── 每日记事本.spec     # PyInstaller 配置
@@ -128,7 +128,7 @@ pip install pytest
 pytest tests/ -q
 ```
 
-667 个用例，覆盖解析准确率、对话流程、跨天归档、中英切换、撤回语义、GUI 交互、打包配置等。
+707 个用例，覆盖解析准确率、对话流程、跨天归档、中英切换、撤回语义、GUI 交互、打包配置等。
 
 ---
 

@@ -58,6 +58,18 @@ STRINGS = {
     "done_notfound": ("没找到「{title}」这条，是不是已经勾过了？",
                       "Couldn't find \"{title}\". Already checked?"),
     "deleted": ("已删除「{title}」。", "Deleted \"{title}\"."),
+    # v1.9.9.60
+    "confirm_yes": ("是", "Yes"),
+    "confirm_no": ("否", "No"),
+    "backup_fail_abort": ("覆盖前的备份没写进去（{e}），本次操作已取消，数据原样保留。"
+                          "请检查磁盘空间或文件占用后再试。",
+                          "Backup before overwrite failed ({e}). Cancelled — "
+                          "your data is untouched. Check disk space / file locks."),
+    "data_fixed": ("启动时自动修复了异常数据，原文件已留档为 data 里的 "
+                   ".before-fix-* 副本，需要找回请用「从备份恢复」。",
+                   "Fixed some broken data on startup. The original file was "
+                   "kept as a .before-fix-* copy in the data folder — use "
+                   "\"Restore from backup\" to get it back."),
     "greet": (["在的，今天想先安排哪件事？", "嗨，说几件今天要做的事吧。", "来了。今天的任务直接报给我。"],
               ["Here. What's first today?", "Hi — give me a few things for today.",
                "Ready. Fire away with today's tasks."]),

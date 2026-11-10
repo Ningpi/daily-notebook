@@ -568,6 +568,42 @@ def _restore_math(t, bag):
     return t
 
 
+# v1.9.9.60：ASCII 复合词元保护。结尾的全局标点剔除 + BARE_NUM_RE 裸数字
+# 剔除会把版本号、邮箱、编号一起啃掉（实测「v1.9.9.59」→「v59」、
+# 「test@example.com」→「test@examplecom」、「A-102」→「A」、「3.5公里」
+# →「5公里」）。先把这类词元整体换成「纯字母」占位符——占位符里不能有
+# 数字，否则 BARE_NUM_RE 的 (?<!\d) 环视会继续拆它。
+_TOKEN_RE = re.compile(
+    r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"   # 邮箱
+    r"|[A-Za-z0-9]+(?:[.\-_~][A-Za-z0-9]+)+")             # v1.9.9.59 / A-102 / 3.5
+_ALPHA26 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def _token_slot(i):
+    s = ""
+    while True:
+        s = _ALPHA26[i % 26] + s
+        i = i // 26 - 1
+        if i < 0:
+            return "\x02TK" + s + "\x03"
+
+
+def _protect_tokens(t):
+    bag = []
+
+    def _wrap(m):
+        bag.append(m.group(0))
+        return _token_slot(len(bag) - 1)
+
+    return _TOKEN_RE.sub(_wrap, t), bag
+
+
+def _restore_tokens(t, bag):
+    for i, v in enumerate(bag or []):
+        t = t.replace(_token_slot(i), v)
+    return t
+
+
 def _protect_qty(t):
     """把「20个 / 3次 / 2位」这类数量词换成占位符，免被当噪音数字删掉。
     时间量词（分钟 / 小时 / 点）不保护，交给 find_duration / find_times 处理。"""
@@ -701,6 +737,10 @@ def clean_title(text, hits=()):
     # 必须在程度词删除之前做：否则 DEGREE_WORDS 先删「很」剩孤字「重」。
     _PRI = r"(?:非常重要|十分紧急|特别重要|很重要|很紧急|很急|好急|太急|特急|重要|紧急|要紧|火急|加急|急)"
     t = re.sub(r"[\s，,]*" + _PRI + r"\s*$", " ", t)
+    # v1.9.9.60：先保护 ASCII 复合词元（版本号/邮箱/编号/小数），再走
+    # 时间剔除与标点清洗，末尾还原——否则「v1.9.9.59」「test@example.com」
+    # 「A-102」「3.5公里」会被啃成「v59」「test@examplecom」「A」「5公里」。
+    t, _tok_bag = _protect_tokens(t)
     # v1.9.9.18：算式（1+1=2 / 3*4 / 15/3）先整体保护起来。否则
     # BARE_NUM_RE 会把孤立的数字剥掉，只剩「+=」这种残缺标题。
     t, _math_bag = _protect_math(t)
@@ -843,6 +883,7 @@ def clean_title(text, hits=()):
             t = t2
     t = _restore_shi(t, _t_bag)
     t = _restore_math(t, _math_bag)
+    t = _restore_tokens(t, _tok_bag)
     return t
 
 

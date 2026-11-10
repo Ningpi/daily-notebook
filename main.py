@@ -27,7 +27,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.59"
+VERSION = "1.9.9.60"
 
 # 单条输入的长度上限（v1.9.9.51）
 # 用户实测贴长文会「少了一大截」甚至卡住，而程序既不提示也不报错。
@@ -188,19 +188,30 @@ def normalize_tasks(tasks, today=None):
 
     手改过或第三方生成的 JSON 常常缺字段：没有 id 就删不掉、勾不了；
     score 是字符串会让排序 TypeError；hhmm 写成「8点」会让提醒循环抛
-    异常并连累整轮。这里统一补全，坏值一律回到安全默认。"""
+    异常并连累整轮。这里统一补全，坏值一律回到安全默认。
+
+    v1.9.9.60：改为「在原字典上修字段」而不是按白名单重建——旧版把
+    remind_before / remind_at / remind_day / reminded / _from_raw /
+    dur_min / deadline_txt 全部丢掉，恢复备份等于丢提醒；「last_done_day」
+    还被写成没人读的「last_done」，连续打卡下次归零（数据丢失实测）。
+    空标题条目不再静默丢弃：给占位名保留（与读盘清洗同口径），导入计数
+    也不再前后矛盾。"""
     out, seen = [], set()
     today = today or dt.date.today().isoformat()
     for t in (tasks or []):
         if not isinstance(t, dict):
             continue
+        t = dict(t)                      # 保留未知/扩展字段，不整条重建
         try:
             title = t.get("title")
             title = title.strip() if isinstance(title, str) else str(title or "").strip()
         except Exception:
             title = ""
         if not title:
-            continue
+            # v1.9.9.60：空标题给占位名保留——静默丢弃等于丢任务，
+            # 且确认框里报的条数和实际导入的条数对不上
+            title = "（未命名任务）"
+        t["title"] = title
         tid = t.get("id")
         tid = str(tid).strip() if tid is not None else ""
         if not tid or tid in seen:
@@ -208,33 +219,58 @@ def normalize_tasks(tasks, today=None):
             while tid in seen:
                 tid = "%d%03d" % (int(time.time() * 1000), random.randint(0, 999))
         seen.add(tid)
+        t["id"] = tid
         try:
             score = int(float(t.get("score", 30)))
         except Exception:
             score = 30
-        score = max(0, min(100, score))
+        t["score"] = max(0, min(100, score))
         try:
             dur = t.get("dur")
             dur = int(dur) if dur is not None else None
         except Exception:
             dur = None
-        rep = _norm_repeat(t.get("repeat"))
-        out.append({
-            "id": tid,
-            "title": title,
-            "hhmm": _norm_hhmm(t.get("hhmm")),
-            "dur": dur,
-            "score": score,
-            "manual": bool(t.get("manual")),
-            "done": bool(t.get("done")),
-            "created": str(t.get("created") or ""),
-            "day": _norm_date(t.get("day")) or today,
-            "due_date": _norm_date(t.get("due_date")),
-            "done_at": str(t.get("done_at") or ""),
-            "repeat": rep,
-            "streak": int(t.get("streak") or 0) if str(t.get("streak") or "0").strip().lstrip("-").isdigit() else 0,
-            "last_done": _norm_date(t.get("last_done")),
-        })
+        t["dur"] = dur
+        t["hhmm"] = _norm_hhmm(t.get("hhmm"))
+        t["manual"] = bool(t.get("manual"))
+        t["done"] = bool(t.get("done"))
+        t["created"] = str(t.get("created") or "")
+        t["day"] = _norm_date(t.get("day")) or today
+        t["due_date"] = _norm_date(t.get("due_date"))
+        t["done_at"] = str(t.get("done_at") or "")
+        t["repeat"] = _norm_repeat(t.get("repeat"))
+        try:
+            t["streak"] = int(t.get("streak") or 0) \
+                if str(t.get("streak") or "0").strip().lstrip("-").isdigit() else 0
+        except Exception:
+            t["streak"] = 0
+        # v1.9.9.60：旧版导出把「最后完成日」存成 last_done（正确字段名是
+        # last_done_day）——两个名字都认，统一收进 last_done_day
+        t["last_done_day"] = _norm_date(t.get("last_done_day")
+                                        or t.get("last_done"))
+        t.pop("last_done", None)
+        # v1.9.9.60：提醒字段不能再丢——恢复备份后提醒全灭等于功能丢失。
+        # 坏值收进安全范围，与读盘清洗同口径
+        try:
+            rb = int(float(t.get("remind_before", 0) or 0))
+        except Exception:
+            rb = 0
+        t["remind_before"] = max(0, min(1440, rb))
+        ra = t.get("remind_at")
+        t["remind_at"] = _norm_hhmm(ra) if ra not in (None, "") else None
+        try:
+            rd = int(float(t.get("remind_day", 0) or 0))
+        except Exception:
+            rd = 0
+        t["remind_day"] = max(0, min(3650, rd))
+        t["reminded"] = bool(t.get("reminded"))
+        t["reminded_day"] = _norm_date(t.get("reminded_day"))
+        t["_from_raw"] = bool(t.get("_from_raw"))
+        dmin = t.get("dur_min")
+        t["dur_min"] = dmin if isinstance(dmin, (int, float)) else None
+        dtxt = t.get("deadline_txt")
+        t["deadline_txt"] = None if dtxt is None else str(dtxt)
+        out.append(t)
     return out
 
 
@@ -316,6 +352,7 @@ class Store(object):
         self.user_name = ""        # 用户昵称（首次启动问出来）
         self.bot_name = ""         # 助手自己的名字
         self.setup_stage = 0       # 0=没问过 1=已问昵称 2=都问好了
+        self.greet_day = ""        # v1.9.9.60：当天已推过问候的日期（防重复累积）
         self.bubble_enabled = True # 右下角「未完成任务」气泡开关
         self.bubble_w = 84         # 气泡宽度（拖拽缩放，60~160）
         self.font_scale = 1.0      # 字体缩放（0.8~1.3）
@@ -339,11 +376,23 @@ class Store(object):
         self.sync_history()
         # v1.9.9.52：读盘时修过的脏字段回写一次。否则界面上显示的是
         # 修正后的值、磁盘里还是坏值，下次启动又得再修一遍。
+        # v1.9.9.60：回写前先把原文件另存一份 `.before-fix-时间戳`——
+        # 旧版夹值/清空后立刻写盘，原值无副本、无提示，用户想找回都难
+        # （实测「deadline_txt 被一并清掉」）。另存失败就不回写，宁可
+        # 下次启动再修一遍，也不丢唯一的原件。
         if getattr(self, "_dirty_fix", False) and not getattr(self, "load_failed", False):
+            _fix_ok = False
             try:
-                self.save()
+                ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+                shutil.copy2(self.path, self.path + ".before-fix-" + ts)
+                _fix_ok = True
             except Exception:
-                pass
+                _fix_ok = False
+            if _fix_ok:
+                try:
+                    self.save()
+                except Exception:
+                    pass
         if getattr(self, "_dirty_hist", False) and not getattr(self, "hist_failed", False):
             try:
                 self.save_history()
@@ -443,8 +492,8 @@ class Store(object):
         t["streak"] = cls._to_num(t.get("streak"), 0, 0)
         t["dur_min"] = t.get("dur_min") if isinstance(t.get("dur_min"), (int, float)) else None
         if not cls._clock_ok(t.get("hhmm")):
-            if t.get("hhmm") is not None:
-                t["deadline_txt"] = None
+            # v1.9.9.60：hhmm 坏了只清 hhmm——旧版把 deadline_txt 一并清掉，
+            # 用户写的原始时间短语也跟着消失，想手工补都没依据（实测）
             t["hhmm"] = None
         if not cls._clock_ok(t.get("remind_at")):
             t["remind_at"] = None
@@ -696,6 +745,8 @@ class Store(object):
         self.user_name = _safe(lambda: (obj.get("user_name") or "").strip(), "")
         self.bot_name = _safe(lambda: (obj.get("bot_name") or "").strip(), "")
         self.setup_stage = self._to_num(_safe(lambda: obj.get("setup_stage", 0), 0), 0, 0, 9)
+        # v1.9.9.60：问候去重标记，坏值一律当「没推过」
+        self.greet_day = _safe(lambda: str(obj.get("greet_day") or ""), "")
         self.bubble_enabled = self._to_bool(_safe(lambda: obj.get("bubble_enabled", True), True), True)
         self.bubble_w = self._to_num(_safe(lambda: obj.get("bubble_w", 84), 84), 84, 60, 160)
         self.font_scale = self._to_num(_safe(lambda: obj.get("font_scale", 1.0), 1.0),
@@ -808,6 +859,7 @@ class Store(object):
             "user_name": getattr(self, "user_name", ""),
             "bot_name": getattr(self, "bot_name", ""),
             "setup_stage": int(getattr(self, "setup_stage", 0)),
+            "greet_day": str(getattr(self, "greet_day", "") or ""),
             "bubble_enabled": bool(getattr(self, "bubble_enabled", True)),
             "bubble_w": int(getattr(self, "bubble_w", 84)),
             "font_scale": round(float(getattr(self, "font_scale", 1.0) or 1.0), 2),
@@ -1921,6 +1973,11 @@ class NoteApp(object):
                 self.push_tr("bot", "save_warn")
                 self._show_banner(tr("save_failed_banner"), kind="save",
                                   sticky=True)
+            # v1.9.9.60：启动时修过脏数据要当面说一声——旧版静默回写，
+            # 用户不知道值被夹过、原文件留了副本可以找回
+            if getattr(self.store, "_dirty_fix", False) \
+                    and not getattr(self.store, "load_failed", False):
+                self.push_tr("bot", "data_fixed")
             stage = int(getattr(self.store, "setup_stage", 0) or 0)
             nm = getattr(self.store, "user_name", "")
             if stage == 0:
@@ -1931,8 +1988,14 @@ class NoteApp(object):
             elif stage >= 3 and nm:
                 # 每日问候：按「今天的序号」取池子里一句 → 同一天不换，
                 # 跨天换下一句，10 句一轮不重样
-                cur, dual = self._daily_greet_dual()
-                self.push("bot", cur, dual=dual)
+                # v1.9.9.60：同一天只推一次——旧版每次启动都追加一条
+                # 相同问候，聊几轮一滚屏全是重复的开场白（实测截图两条
+                # 一模一样的「早上好」）。用 greet_day 记当天是否推过。
+                if getattr(self.store, "greet_day", "") != self.store._today():
+                    cur, dual = self._daily_greet_dual()
+                    self.push("bot", cur, dual=dual)
+                    self.store.greet_day = self.store._today()
+                    self.store.save()
         except Exception:
             pass
 
@@ -2646,6 +2709,7 @@ class NoteApp(object):
         win.title(tr("about_title"))
         win.configure(bg=C.BG)
         win.geometry("500x560+240+110")
+        self._popup_topmost(win)      # v1.9.9.60：跟随主窗置顶开关
         win.attributes("-alpha", min(1.0, getattr(self.store, "alpha", 0.95) + 0.04))
         body = tk.Frame(win, bg=C.BG)
         body.pack(fill="both", expand=True)
@@ -3754,6 +3818,7 @@ class NoteApp(object):
     def toggle_top(self):
         self.store.topmost = not self.store.topmost
         self.root.attributes("-topmost", self.store.topmost)
+        self._sync_popups_topmost()   # v1.9.9.60：开着的弹窗一起跟随
         self.store.save()
         self.draw_head()
         self.flash(tr("pinned_on") if self.store.topmost else tr("pinned_off"))
@@ -3825,10 +3890,9 @@ class NoteApp(object):
         # 结果直接 os._exit(0)，磁盘满/文件被占用时最后一次改动静默丢失。
         if err:
             try:
-                from tkinter import messagebox
                 self._show_banner(tr("save_failed_banner"), kind="save",
                                   sticky=True)
-                ok = messagebox.askyesno(
+                ok = self._ask_yesno(
                     self.app_name(), tr("quit_save_failed", e=err))
                 if not ok:
                     # 什么都不拆，原样继续跑（定时器/托盘/气泡都还在）
@@ -6828,6 +6892,7 @@ class NoteApp(object):
         win.title(tr("note_detail_title"))
         win.configure(bg=C.BG)
         win.geometry("420x320+300+180")
+        self._popup_topmost(win)      # v1.9.9.60：跟随主窗置顶开关
         win.attributes("-alpha", min(1.0, getattr(self.store, "alpha", 0.95) + 0.04))
         day = note.get("day") or ""
         head = ""
@@ -6895,7 +6960,12 @@ class NoteApp(object):
             return "%s %s" % (tr("day_yesterday"), created or "")
         if diff == 2:
             return "%s %s" % (tr("day_2ago"), created or "")
-        return "%s/%s %s" % (day[5:7], day[8:10], created or "")
+        # v1.9.9.60：日期不补零（「11/1」而不是「11/01」），与截止日期
+        # 「11/15前」的写法统一；旧写法还让测试在每月 1–9 号随机挂掉
+        try:
+            return "%d/%d %s" % (int(day[5:7]), int(day[8:10]), created or "")
+        except ValueError:
+            return "%s %s" % (day[5:].replace("-", "/"), created or "")
 
     def _note_del_show(self, nid, show):
         """悬停便签行时显示/隐藏该行的「删除」键（v1.9.4）"""
@@ -7106,6 +7176,16 @@ class NoteApp(object):
         v1.9.9.59：整块（文字+按钮）按可视区高度**真正居中**，窗口缩放
         实时跟随；旧版顶部固定留白，窗口一矮文字/按钮就被底栏遮住。"""
         try:
+            # v1.9.9.60：优先用画布**当前真实宽度**——调用方传进来的 w 是
+            # 渲染那一刻的快照，首次渲染常发生在画布布局完成前（宽度还是
+            # 默认 1），整块「还没有任务 / ＋ 记一条」就被画到左缘去了
+            # （实测「批次 4」占位文案错位）
+            try:
+                _live = cv.winfo_width()
+                if _live and _live > 40:
+                    w = _live
+            except Exception:
+                pass
             ch = cv.winfo_height()
             if ch < 60:                 # 首帧还没布局好，按窗口高度估
                 ch = max(120, self.root.winfo_height() - 160)
@@ -7183,9 +7263,8 @@ class NoteApp(object):
         """一行里「时间 + 用时」占掉的宽度（draw_row 与 refresh_tasks 共用，
         保证 fits 判断与实际绘制同口径，v1.9.7）"""
         tx = 15
-        hhmm = t.get("hhmm")
-        if hhmm:
-            tshow = self._row_time_text(t)       # v1.9.9.43：与绘制同口径
+        tshow = self._row_time_text(t)       # v1.9.9.43：与绘制同口径
+        if tshow:
             # 间隔 10px ≈ 一个半角字符宽（v1.9.9.3：用户反馈时间与标题之间
             # 空太多——draw_row 曾把这个宽度又加了一遍，间隔翻倍）
             tx += self.text_width(tshow, self.f_small) + 10
@@ -7213,7 +7292,18 @@ class NoteApp(object):
                 hhmm = t.get("hhmm")
                 return (rt + " " + hhmm) if hhmm else rt
         hhmm = t.get("hhmm")
-        return self._tshow(t, hhmm) if hhmm else ""
+        if hhmm:
+            return self._tshow(t, hhmm)
+        # v1.9.9.60：只有截止日期没有时刻的任务也要露出日期——旧版整列
+        # 空白，用户看不出这条排在哪天（实测「批次 8」）
+        dd = t.get("due_date")
+        if dd and dd != self.store._today():
+            try:
+                _y, _m, _d = [int(x) for x in dd.split("-")]
+                return "%d/%d前" % (_m, _d)
+            except Exception:
+                return ""
+        return ""
 
     def _tshow(self, t, hhmm):
         """时间列显示文本：非今天的任务在时间前带日期（v1.9.5）"""
@@ -7270,12 +7360,12 @@ class NoteApp(object):
         # v1.9.9.3：tx 已含「时间宽 + 间隔」，这里不能再加上一遍
         # （之前时间宽被算两次，标题与时间之间空出一大截）
         tx, dw, dur_txt = self._row_prefix_w(task, w)
-        hhmm = task.get("hhmm")
+        # v1.9.9.60：时间列文本不再依赖 hhmm——纯截止日期的行也画
+        tshow = self._row_time_text(task)
         # v1.9.9.46：去掉行首的「●」小标记——它画在 x=11，时间文字从 x=15
         # 起，字体一大「●」就压在「每天/每周一」的第一个字上（用户实测
         # 问题 14）。日常身份靠青色竖条 + 青底 + 青色时间已经足够辨认。
-        if hhmm:
-            tshow = self._row_time_text(task)    # v1.9.9.43：日常显示周期文字
+        if tshow:
             cv.create_text(15, y + rh / 2, text=tshow, anchor="w",
                            font=self.f_small,
                            fill=(_mix(C_DAILY, bg, 0.35) if (done and daily)
@@ -8205,9 +8295,11 @@ class NoteApp(object):
         # v1.9.8：手动删除的任务从历史里一并清掉（按标题匹配所有天），
         # 之前只删待办，历史窗口里还躺着
         titles = set()
+        _del_title = ""
         for t in self.store.tasks:
             if t["id"] == tid:
                 titles.add(t.get("title", ""))
+                _del_title = t.get("title", "")
                 # v1.9.9.22：删除也可撤回（还原原位置）
                 self._push_undo({"kind": "delete", "id": tid,
                                  "task": dict(t),
@@ -8220,6 +8312,10 @@ class NoteApp(object):
             self.store.purge_history(titles, only_today=True, tids={tid})
         self.store.save()
         self.refresh_tasks()
+        # v1.9.9.60：右键删除也在聊天区给一条回执——旧版只有聊天指令
+        # 删除有回执，右键删完毫无动静，用户不知道刚才那下有没有生效
+        if _del_title:
+            self.push_tr("bot", "deleted", title=_del_title)
 
     def clear_done(self):
         n = len([t for t in self.store.tasks if t.get("done")])
@@ -8295,6 +8391,11 @@ class NoteApp(object):
             # 不是关掉——旧版直接 _close_clock，用户以为点了没反应
             try:
                 if win.wm_state() == "iconic" or not win.winfo_viewable():
+                    self._popup_raise(win)
+                    return
+                # v1.9.9.60：还可见但被别的窗口压在下面——同样是「唤回来」。
+                # 只有真正在最上层时，再点才是关闭（保留开关手感）
+                if not self._is_on_top(win):
                     self._popup_raise(win)
                     return
             except Exception:
@@ -9422,6 +9523,7 @@ class NoteApp(object):
         win.title(tr("cal_title"))
         win.configure(bg=C.BG)
         win.geometry("560x480+260+140")
+        self._popup_topmost(win)      # v1.9.9.60：跟随主窗置顶开关
         win.attributes("-alpha", min(1.0, getattr(self.store, "alpha", 0.95) + 0.04))
         self._cal_y, self._cal_m = dt.date.today().year, dt.date.today().month
         nav = tk.Frame(win, bg=C.BG)
@@ -9707,10 +9809,14 @@ class NoteApp(object):
     # 这里集中放全部日常任务：频率、时间、连续天数一目了然，
     # 点任意一条进详情页改时间 / 改频率 / 删除。
     def _popup_raise(self, win):
-        """v1.9.9.59：已开的弹出窗再次点底栏按钮时——最小化的还原、
-        被别的窗口盖住的置顶抢焦点。旧版只 lift()（同一父窗口内排序，
-        Windows 上几乎看不出效果），最小化的窗口点了毫无反应（用户实测：
-        日常窗最小化后再点「日常」没反应）。"""
+        """已开的弹出窗再次点底栏按钮时——最小化的还原、被盖住的拉到最上。
+
+        v1.9.9.60：旧版「置顶 150ms 后交还 False」有两个致命伤：
+        ① 历史记录窗是**常驻置顶**（跟随主窗置顶开关），日常窗 150ms 后
+        被摘掉置顶，立刻又掉回历史窗下面——用户实测「再点日常还在下面」；
+        ② 窗口之间的创建顺序决定堆叠，只 lift() 在 Windows 上几乎无效。
+        现在：先把 -topmost 摘掉再按主窗置顶开关戴回去——两步都会让
+        Windows 把窗口重新插到当前层级的顶上，且层级与主窗一致不再回落。"""
         try:
             if not win.winfo_exists():
                 return
@@ -9720,12 +9826,14 @@ class NoteApp(object):
                     win.deiconify()
             except Exception:
                 pass
-            win.lift()
-            # 短暂 topmost 抢一下层级，随后交还，不做常驻置顶
+            top = bool(getattr(self.store, "topmost", True))
             try:
-                win.attributes("-topmost", True)
-                win.after(150, lambda: win.winfo_exists() and
-                          win.attributes("-topmost", False))
+                win.attributes("-topmost", False)
+                win.attributes("-topmost", top)
+            except Exception:
+                pass
+            try:
+                win.lift()
             except Exception:
                 pass
             try:
@@ -9734,6 +9842,44 @@ class NoteApp(object):
                 pass
         except Exception:
             pass
+
+    def _is_on_top(self, win):
+        """窗口是否已经在最上层（v1.9.9.60）
+
+        底栏「时钟」是开/关切换键：可见时再点是关闭。但窗口被别的窗口盖住
+        时，用户点它其实是想「找回来」，此时关掉等于毫无反馈。这里问一下
+        窗口中心的那个点归谁——不是自己就说明被压住了。"""
+        try:
+            if not win.winfo_viewable():
+                return False
+            x = win.winfo_rootx() + max(1, win.winfo_width()) // 2
+            y = win.winfo_rooty() + max(1, win.winfo_height()) // 2
+            w = win.winfo_containing(x, y)
+            return w is not None and w.winfo_toplevel() is win
+        except Exception:
+            return False
+
+    def _popup_topmost(self, win):
+        """弹窗创建时统一跟随主窗的置顶开关（v1.9.9.60）。
+
+        旧版只有历史窗/时钟窗置顶，日常/日历/关于/便签详情窗不置顶——
+        同屏时必然压在置顶窗下面，怎么点都翻不上来（实测截图）。"""
+        try:
+            win.attributes("-topmost", bool(getattr(self.store, "topmost", True)))
+        except Exception:
+            pass
+
+    def _sync_popups_topmost(self):
+        """主窗切换置顶时，所有开着的弹窗一起跟随（v1.9.9.60）"""
+        for name in ("_dmgr_win", "_hist_win", "_cal_win", "_about_win",
+                     "_note_detail_win", "_detail_win", "_restore_win"):
+            w = getattr(self, name, None)
+            if w is not None:
+                try:
+                    if w.winfo_exists():
+                        w.attributes("-topmost", bool(self.store.topmost))
+                except Exception:
+                    pass
 
     def open_daily_manager(self):
         win = getattr(self, "_dmgr_win", None)
@@ -9746,6 +9892,7 @@ class NoteApp(object):
         win.title(tr("daily_mgr_title") + " · " + self.app_name())
         win.configure(bg=C.BG)
         win.geometry("430x430+240+150")
+        self._popup_topmost(win)      # v1.9.9.60：跟随主窗置顶开关
         win.attributes("-alpha", min(1.0, getattr(self.store, "alpha", 0.95) + 0.04))
         # v1.9.9.50：保存引用，切语言后 refresh_labels 会刷新这行提示
         self._dmgr_hint_lbl = tk.Label(win, text=tr("daily_mgr_hint"),
@@ -10000,16 +10147,23 @@ class NoteApp(object):
         里翻——等于把「救命的入口」藏在了只有开发者知道的地方（QA 实测）。
         现在按日期倒序列出快照，显示「几条任务 / 几条历史」，点一下就恢复。
         恢复前先把当前文件另存一份，恢复错了还能再回来。"""
+        # v1.9.9.60：已开着就置顶还原，不再叠一个新窗
+        old = getattr(self, "_restore_win", None)
+        if old is not None and old.winfo_exists():
+            self._popup_raise(old)
+            return
         try:
             import exporter as _exp
             snaps = _exp.list_snapshots(data_dir())
         except Exception:
             snaps = []
         win = tk.Toplevel(self.root)
+        self._restore_win = win
         win.title(tr("restore_backup") + " · " + self.app_name())
         win.configure(bg=C.BG)
         win.geometry("440x400+260+160")
         win.transient(self.root)
+        self._popup_topmost(win)      # v1.9.9.60：跟随主窗置顶开关
         tk.Label(win, text=tr("restore_hint"), bg=C.BG, fg=C.SUB,
                  font=self.f_tiny, wraplength=410, justify="left"
                  ).pack(side="top", anchor="w", padx=10, pady=(8, 4))
@@ -10110,9 +10264,77 @@ class NoteApp(object):
             pass
         return None
 
+    def _backup_before_overwrite(self, pairs):
+        """覆盖前另存（v1.9.9.60）。pairs = [(路径, 后缀), ...]
+
+        全部成功返回 None；任何一个失败返回错误说明（调用方必须中止，
+        不能带着失败继续覆盖——否则失败即不可回退）。文件不存在视为
+        无需备份（首次导入时 tasks.json 还没生成）。"""
+        for path, suffix in pairs:
+            if not os.path.exists(path):
+                continue
+            try:
+                shutil.copy2(path, path + suffix)
+            except Exception as exc:
+                return "%s: %s" % (os.path.basename(path), exc)
+        return None
+
+    def _ask_yesno(self, title, msg):
+        """置顶安全的「是 / 否」确认框（v1.9.9.60）
+
+        原生 messagebox 没有置顶属性：历史记录窗是常驻置顶时，恢复备份
+        的确认框被压在下面，表现为「点恢复没反应」（实测）。自绘对话框
+        跟随主窗置顶设置，且 grab 模态，不会被任何弹窗盖住。"""
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.configure(bg=C.BG)
+        win.transient(self.root)
+        win.resizable(False, False)
+        win.attributes("-topmost", bool(getattr(self.store, "topmost", True)))
+        tk.Label(win, text=msg, bg=C.BG, fg=C.TEXT, font=self.f_task,
+                 wraplength=360, justify="left").pack(padx=18, pady=(16, 10))
+        ans = {"v": False}
+
+        def _set(v):
+            ans["v"] = v
+            try:
+                win.grab_release()
+            except Exception:
+                pass
+            win.destroy()
+
+        btns = tk.Frame(win, bg=C.BG)
+        btns.pack(side="bottom", pady=(0, 12))
+        tk.Button(btns, text=tr("confirm_yes"), width=8, relief="flat",
+                  bg=C.ACCENT, fg="white", activebackground=C.ACCENT,
+                  activeforeground="white",
+                  command=lambda: _set(True)).pack(side="left", padx=6)
+        tk.Button(btns, text=tr("confirm_no"), width=8, relief="flat",
+                  bg=C.ROW2, fg=C.TEXT,
+                  command=lambda: _set(False)).pack(side="left", padx=6)
+        win.protocol("WM_DELETE_WINDOW", lambda: _set(False))
+        # 居中于主窗
+        try:
+            win.update_idletasks()
+            rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+            rw, rh = self.root.winfo_width(), self.root.winfo_height()
+            w, h = win.winfo_width(), win.winfo_height()
+            win.geometry("+%d+%d" % (rx + max(0, (rw - w) // 2),
+                                     ry + max(0, (rh - h) // 3)))
+        except Exception:
+            pass
+        try:
+            win.grab_set()
+        except Exception:
+            pass
+        try:
+            win.wait_window()
+        except Exception:
+            pass
+        return ans["v"]
+
     def _restore_snapshot(self, day, which, win=None):
         """把某天快照里的 tasks.json / history.json 恢复回来"""
-        from tkinter import messagebox
         try:
             import exporter as _exp
             src_dir = os.path.join(_exp.backup_dir(data_dir()), day)
@@ -10124,15 +10346,17 @@ class NoteApp(object):
         if not os.path.exists(src):
             self.flash(tr("restore_missing", n=name))
             return
-        if not messagebox.askyesno(
+        if not self._ask_yesno(
                 self.app_name(), tr("restore_confirm", d=day, n=name)):
             return
+        # v1.9.9.60：恢复覆盖前的另存必须成功——旧版 except: pass 吞掉
+        # 写盘失败，照样覆盖当前文件还报成功，想回退都没得回
         ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        try:
-            if os.path.exists(dst):
-                shutil.copy2(dst, dst + ".before-restore-" + ts)
-        except Exception:
-            pass
+        _bk_err = self._backup_before_overwrite(
+            [(dst, ".before-restore-" + ts)])
+        if _bk_err:
+            self.push("bot", tr("backup_fail_abort", e=_bk_err))
+            return
         try:
             shutil.copy2(src, dst)
         except Exception as exc:
@@ -10173,7 +10397,7 @@ class NoteApp(object):
         if isinstance(t, dict)]` 塞进内存——缺 id 的任务导入「成功」之后
         刷新、删除、勾选全部报错（被异常兜底接住，但等于功能不可用，
         用户还以为是软件坏了）。"""
-        from tkinter import filedialog, messagebox
+        from tkinter import filedialog
         try:
             p = filedialog.askopenfilename(
                 title=tr("import_title"), initialdir=data_dir(),
@@ -10195,24 +10419,25 @@ class NoteApp(object):
         if not isinstance(tasks, list):
             self.push("bot", tr("import_fail", e="no tasks"))
             return
-        if not messagebox.askyesno(
-                self.app_name(), tr("import_confirm", n=len(tasks))):
+        # v1.9.9.60：先规范化再确认——旧版确认框里报的是原始条数，
+        # 空标题条目会被 normalize 静默丢弃，导入结果对不上账
+        ntasks = normalize_tasks(tasks)
+        if not self._ask_yesno(
+                self.app_name(), tr("import_confirm", n=len(ntasks))):
             return
         # 先保命：当前数据另存一份（v1.9.9.47 连历史一起备份——
         # 旧版只备份 tasks.json，导入一份带 history 的 JSON 会把历史覆盖掉
         # 且无法回退；messages 存在 tasks.json 里，随它一起备份）
-        try:
-            ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-            shutil.copy2(self.store.path, self.store.path + ".before-import-" + ts)
-        except Exception:
-            pass
-        try:
-            ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-            shutil.copy2(self.store.hist_path,
-                         self.store.hist_path + ".before-import-" + ts)
-        except Exception:
-            pass
-        self.store.tasks = normalize_tasks(tasks)
+        # v1.9.9.60：备份写盘失败必须中止——旧版 except: pass 吞掉后
+        # 照样覆盖当前数据还报成功，失败即不可回退（数据丢失实测）
+        ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        _bk_err = self._backup_before_overwrite(
+            [(self.store.path, ".before-import-" + ts),
+             (self.store.hist_path, ".before-import-" + ts)])
+        if _bk_err:
+            self.push("bot", tr("backup_fail_abort", e=_bk_err))
+            return
+        self.store.tasks = ntasks
         hist = obj.get("history")
         if isinstance(hist, dict):
             self.store.history = {k: [r for r in v if isinstance(r, dict)]
@@ -10220,7 +10445,10 @@ class NoteApp(object):
                                   if isinstance(v, list)}
         msgs = obj.get("messages")
         if isinstance(msgs, list):
-            self.store.messages = [m for m in msgs if isinstance(m, dict)][-MSG_KEEP:]
+            # v1.9.9.60：走统一清洗（role 只认 me/bot、text 必须字符串），
+            # 旧版只挡非字典，坏 role 会让气泡渲染挂掉
+            self.store.messages = Store._sanitize_messages(
+                [m for m in msgs if isinstance(m, dict)][-MSG_KEEP:])[0]
         st = obj.get("settings") or {}
         try:
             if st.get("user_name"):
@@ -10768,6 +10996,8 @@ def main():
             # 跨天开场也从轮换池取，避免每天都是同一句（双语推送）
             cur, dual = app._daily_greet_dual()
             app.push("bot", cur, dual=dual)
+            # v1.9.9.60：同步问候去重标记（当天重启不再重复推）
+            app.store.greet_day = app.store.today
             if app._hist_win is not None and app._hist_win.winfo_exists():
                 app._render_history()
         root.after(60000, tick)
