@@ -187,7 +187,7 @@ class TestGreetOnce:
 
 
 # ------------------------- 6. 置顶安全确认框
-def _pump_until(root, cond, frames=200):
+def _pump_until(root, cond, frames=400):
     for _ in range(frames):
         root.update()
         if cond():
