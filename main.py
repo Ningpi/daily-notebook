@@ -27,7 +27,7 @@ from i18n import t as tr
 
 APP_NAME = "每日记事本"
 APP_NAME_EN = "Daily Note"
-VERSION = "1.9.9.60"
+VERSION = "1.9.9.61"
 
 # 单条输入的长度上限（v1.9.9.51）
 # 用户实测贴长文会「少了一大截」甚至卡住，而程序既不提示也不报错。
@@ -353,6 +353,8 @@ class Store(object):
         self.bot_name = ""         # 助手自己的名字
         self.setup_stage = 0       # 0=没问过 1=已问昵称 2=都问好了
         self.greet_day = ""        # v1.9.9.60：当天已推过问候的日期（防重复累积）
+        self.sw_base = 0.0         # v1.9.9.61：正计时累计秒数（跨启动保留）
+        self.sw_task = ""          # 正计时关联的任务 id（空 = 没关联）
         self.bubble_enabled = True # 右下角「未完成任务」气泡开关
         self.bubble_w = 84         # 气泡宽度（拖拽缩放，60~160）
         self.font_scale = 1.0      # 字体缩放（0.8~1.3）
@@ -747,6 +749,9 @@ class Store(object):
         self.setup_stage = self._to_num(_safe(lambda: obj.get("setup_stage", 0), 0), 0, 0, 9)
         # v1.9.9.60：问候去重标记，坏值一律当「没推过」
         self.greet_day = _safe(lambda: str(obj.get("greet_day") or ""), "")
+        # v1.9.9.61：正计时状态——坏值一律当 0 / 空
+        self.sw_base = _safe(lambda: float(obj.get("sw_base") or 0), 0.0) or 0.0
+        self.sw_task = _safe(lambda: str(obj.get("sw_task") or ""), "")
         self.bubble_enabled = self._to_bool(_safe(lambda: obj.get("bubble_enabled", True), True), True)
         self.bubble_w = self._to_num(_safe(lambda: obj.get("bubble_w", 84), 84), 84, 60, 160)
         self.font_scale = self._to_num(_safe(lambda: obj.get("font_scale", 1.0), 1.0),
@@ -860,6 +865,8 @@ class Store(object):
             "bot_name": getattr(self, "bot_name", ""),
             "setup_stage": int(getattr(self, "setup_stage", 0)),
             "greet_day": str(getattr(self, "greet_day", "") or ""),
+            "sw_base": float(getattr(self, "sw_base", 0.0) or 0.0),
+            "sw_task": str(getattr(self, "sw_task", "") or ""),
             "bubble_enabled": bool(getattr(self, "bubble_enabled", True)),
             "bubble_w": int(getattr(self, "bubble_w", 84)),
             "font_scale": round(float(getattr(self, "font_scale", 1.0) or 1.0), 2),
@@ -1336,6 +1343,9 @@ class DueCard(object):
             w.bind("<Button-1>", press)
             w.bind("<B1-Motion>", drag)
             w.bind("<ButtonRelease-1>", click)
+            # v1.9.9.61：右键提醒卡 → 直接开始给这个任务计时
+            w.bind("<Button-3>", lambda e, tid=self.task.get("id"):
+                   self.app._start_task_timer(tid) if self.alive() else None)
         self._drag_state = st
         self._tick()
 
@@ -1821,6 +1831,12 @@ class NoteApp(object):
     def __init__(self, root):
         self.root = root
         self.store = Store()
+        # v1.9.9.61：正计时状态一启动就从 store 恢复（暂停态 + 上次累计
+        # 时长），时钟窗没开过也能拿到——右键「开始计时」等入口不再踩空
+        self._sw_running = False
+        self._sw_t0 = 0.0
+        self._sw_base = float(getattr(self.store, "sw_base", 0.0) or 0.0)
+        self._sw_task = getattr(self.store, "sw_task", "") or None
         # v1.9.9.45：界面回调异常统一进日志（打包后 stdout 不可见，
         # 否则「点了没反应」永远查不到线索）
         try:
@@ -2695,7 +2711,7 @@ class NoteApp(object):
         内容较长，只读 Text + 滚动条；标题小节加粗，版本号在页脚。"""
         win = getattr(self, "_about_win", None)
         if win is not None and win.winfo_exists():
-            self._popup_raise(win)
+            self._popup_toggle(win)
             return
         win = tk.Toplevel(self.root)
         self._about_win = win
@@ -3882,6 +3898,20 @@ class NoteApp(object):
         # 自动跨天也停了——一个半瘫的窗口（QA 实测）。现在保存和询问都在
         # 一切还活着的时候做完，只有用户确认退出才开始拆。
         self._closing = True
+        # v1.9.9.61：计时途中退出 → 自动暂停并把累计时长存盘。
+        # 旧版直接退出，下次打开既丢时长、任务上的「用时」也停在旧值
+        if getattr(self, "_sw_running", False):
+            try:
+                self._sw_base += time.time() - getattr(self, "_sw_t0", time.time())
+            except Exception:
+                pass
+            self._sw_running = False
+            self._sw_t0 = 0.0
+        try:
+            self.store.sw_base = float(getattr(self, "_sw_base", 0.0) or 0.0)
+            self.store.sw_task = getattr(self, "_sw_task", "") or ""
+        except Exception:
+            pass
         self.store.sync_history()
         self._save_note_pos()
         self.store.save()
@@ -4836,7 +4866,11 @@ class NoteApp(object):
             self._pending_task = None
             if getattr(self, "_pending_q", None) == "pri":
                 self._pending_q = None
-            return True, tr("pri_skipped", t=task["title"]), ""
+            _rep = tr("pri_skipped", t=task["title"])
+            _nxt = self._pop_ask_queue()      # v1.9.9.61：接着问下一条
+            if _nxt:
+                _rep += ("\n" if not i18n.is_en() else " ") + _nxt
+            return True, _rep, ""
 
         need_pri = pt.get("need_pri")
         need_dl = pt.get("need_dl")
@@ -4890,6 +4924,9 @@ class NoteApp(object):
                     self._pending_q = None
                 self.store.save()
                 self._miss_reply = tr("pri_skipped", t=task["title"])
+                _nxt = self._pop_ask_queue()  # v1.9.9.61：接着问下一条
+                if _nxt:
+                    self._miss_reply += ("\n" if not i18n.is_en() else " ") + _nxt
             return False, None, text
         # 完全不像回答（没字母没时间也没说没有）→ 当普通输入处理。
         # 引擎解析出的时间也算「时间」（「明天下午三点」旧正则接不住，v1.9.5），
@@ -5075,6 +5112,16 @@ class NoteApp(object):
                 reply_txt += self._ask_remind_text(task, short=True)
             else:
                 reply_txt = self._ask_remind_text(task)
+        # v1.9.9.61：这条问答链走完、且没有别的追问（提醒/过期）挡在
+        # 前面时，才继续问批量队列里的下一条——字母选项在不同问题里
+        # 含义不同，一次问两件事用户没法答
+        if not getattr(self, "_pending_task", None) \
+                and getattr(self, "_pending_remind", None) is None \
+                and getattr(self, "_pending_q", None) in (None, "pri"):
+            _nxt = self._pop_ask_queue()
+            if _nxt:
+                sep = " " if i18n.is_en() else "\n"
+                reply_txt = (reply_txt + sep + _nxt) if reply_txt else _nxt
         return True, reply_txt, ""
 
     # ---------------- 「一点/两点…」歧义追问（v1.9.5）
@@ -5458,6 +5505,28 @@ class NoteApp(object):
         if i18n.is_en():
             return ("the night before at " + hhmm) if day else ("at " + hhmm)
         return ("前一晚 " + hhmm) if day else ("在 " + hhmm)
+
+    def _pop_ask_queue(self):
+        """当前任务问答链结束 → 继续问队列里的下一条（v1.9.9.61）。
+
+        追加的问题文本；队列空返回 None。批量录入「今天买菜、开会、
+        参加舞会」不再只问第一条、其余默默默认。"""
+        q = getattr(self, "_ask_queue", None) or []
+        while q:
+            tid = q.pop(0)
+            task = None
+            for t in self.store.tasks:
+                if t["id"] == tid:
+                    task = t
+                    break
+            if task is None or task.get("done"):
+                continue
+            ask = self._maybe_ask(task, "")
+            if ask:
+                self._ask_queue = q
+                return ask
+        self._ask_queue = []
+        return None
 
     def _maybe_ask(self, task, raw):
         """新任务加进来后，若缺优先级/截止时间信息就发问；返回回复或 None"""
@@ -6062,8 +6131,13 @@ class NoteApp(object):
                 task["remind_day"] = at_min[1]         # 0=当天 1=前一天
                 task["remind_before"] = None
                 self.store.save()
-                return True, tr("remind_at", t=task["title"],
-                                d=self._remind_at_text(at_min[0], at_min[1]))
+                _rep = tr("remind_at", t=task["title"],
+                          d=self._remind_at_text(at_min[0], at_min[1]))
+                if getattr(self, "_pending_task", None) is None:
+                    _nxt = self._pop_ask_queue()
+                    if _nxt:
+                        _rep += ("\n" if not i18n.is_en() else " ") + _nxt
+                return True, _rep
             self._pending_remind = None
             if tok == "E" or "不用" in text or "无需" in text \
                     or _re_r.search(r"\b(no|none)\b", text, _re_r.I):
@@ -6080,7 +6154,12 @@ class NoteApp(object):
                 if tok and tok not in lmap and tok != "F":
                     task["remind_before"] = 0
                     self.store.save()
-                    return True, tr("remind_off", t=task["title"])
+                    _rep = tr("remind_off", t=task["title"])
+                    if getattr(self, "_pending_task", None) is None:
+                        _nxt = self._pop_ask_queue()
+                        if _nxt:
+                            _rep += ("\n" if not i18n.is_en() else " ") + _nxt
+                    return True, _rep
                 if tok in lmap and lmap[tok]:
                     mins = lmap[tok]
                 elif tok in lmap:          # 选到了「不用提醒」
@@ -6096,13 +6175,23 @@ class NoteApp(object):
                 if mins == 0:
                     task["remind_before"] = 0
                     self.store.save()
-                    return True, tr("remind_off", t=task["title"])
+                    _rep = tr("remind_off", t=task["title"])
+                    if getattr(self, "_pending_task", None) is None:
+                        _nxt = self._pop_ask_queue()
+                        if _nxt:
+                            _rep += ("\n" if not i18n.is_en() else " ") + _nxt
+                    return True, _rep
                 task["remind_before"] = mins
                 task["remind_at"] = None
                 key = {5: "remind_5", 15: "remind_15",
                        30: "remind_30", 60: "remind_60"}[mins]
                 reply = tr("remind_set", t=task["title"], d=tr(key))
             self.store.save()
+            # v1.9.9.61：提醒也问完了 → 批量队列里还有下一条就接着问
+            if getattr(self, "_pending_task", None) is None:
+                _nxt = self._pop_ask_queue()
+                if _nxt:
+                    reply += ("\n" if not i18n.is_en() else " ") + _nxt
             return True, reply
         self._pending_remind = None    # 不是回答，按普通输入处理
         return False, None
@@ -6534,6 +6623,11 @@ class NoteApp(object):
             dur = item[4] if len(item) > 4 else None      # 时长（次要信息）
             # 输入里直接带了 A/B/C/D：提取出来打分，别留在标题里
             raw_seg = item[3] if len(item) > 3 else title
+            # v1.9.9.61：「今天内 / 今日内」= 今天晚上 12 点前（23:59）。
+            # 旧版只记了日期没记钟点，行首空白、也不会响提醒
+            if not hhmm and not (len(item) > 5 and item[5]) and \
+                    re.search(r"今天[之]?内|今日[之]?内", raw_seg or ""):
+                hhmm = "23:59"
             # parser 可能把「，A」当评价语清掉，单任务时回退查完整输入
             letter_m = _re_ad.search(r"(?<![A-Za-z])([ABCD])(?![A-Za-z])",
                                      raw_seg, _re_ad.I)
@@ -6673,10 +6767,25 @@ class NoteApp(object):
             return _msg
         if added:
             # 缺优先级/截止时间 → 追问；信息齐 → 直接确认
+            # v1.9.9.61：批量录入不再「只问第一条、其余默认」——第一条
+            # 照常问，剩下缺信息的排进队列，答完一条自动问下一条
+            _ask_q, _ask_rest = None, []
             for t in new_tasks:
-                q = self._maybe_ask(t, text)
-                if q:
-                    return q
+                if _ask_q is None:
+                    q = self._maybe_ask(t, text)
+                    if q:
+                        _ask_q = q
+                        continue
+                # 这条也缺信息 → 排队（等当前问答链结束再问）
+                # 日常任务本来就不问（无优先级、无钟点），不进队列
+                if not self._is_daily(t) and (not t.get("hhmm")
+                                              or not t.get("manual")):
+                    _ask_rest.append(t["id"])
+            if _ask_q:
+                self._ask_queue = _ask_rest
+                if _ask_rest:
+                    _ask_q += tr("ask_queue_hint", n=len(_ask_rest))
+                return _ask_q
             if i18n.is_en():
                 names = ", ".join('"%s"' % p[0] for p in parsed[:3])
             else:
@@ -6885,7 +6994,7 @@ class NoteApp(object):
         # v1.9.9.59：详情窗已开着就置顶复用，不再叠一个新窗
         old = getattr(self, "_note_detail_win", None)
         if old is not None and old.winfo_exists():
-            self._popup_raise(old)
+            self._popup_toggle(old)
             return
         win = tk.Toplevel(self.root)
         self._note_detail_win = win
@@ -7098,6 +7207,14 @@ class NoteApp(object):
     def refresh_tasks(self, scroll_top=False):
         if getattr(self, "list_mode", "task") == "note":
             return self.refresh_notes()
+        # v1.9.9.61：任务变化时时钟「关联任务」清单跟着重建（打勾/删除
+        # 的任务立刻从清单里消失，不再停留在旧快照里）
+        cw = getattr(self, "_clock_win", None)
+        if cw is not None and cw.winfo_exists():
+            try:
+                self._rebuild_link_menu()
+            except Exception:
+                pass
         cv = self.list_cv
         # v1.9.9.58：任务缺 title（手改 JSON、旧数据、插件写坏）时，渲染层
         # 直接 task["title"] 会 KeyError，整张列表白屏。入口统一补全一次。
@@ -7259,7 +7376,18 @@ class NoteApp(object):
             except Exception:
                 pass
 
-    def _row_prefix_w(self, t, w):
+    def _dur_text(self, t):
+        """行尾「用时」文本（v1.9.9.61）：超过 1 小时按「x小时xx分钟」显示。
+        旧版直接念 dur 原文（「302分钟」），读着费劲；秒表写入时同步存了
+        dur_min，这里优先按分钟数格式化。"""
+        dmin = t.get("dur_min")
+        if isinstance(dmin, (int, float)) and dmin >= 60:
+            h, m = divmod(int(dmin), 60)
+            return tr("spent", d=tr("dur_hm", h=h, m=m))
+        dur = t.get("dur")
+        return tr("spent", d=dur) if dur else ""
+
+    def _row_prefix_w(self, t, maxw):
         """一行里「时间 + 用时」占掉的宽度（draw_row 与 refresh_tasks 共用，
         保证 fits 判断与实际绘制同口径，v1.9.7）"""
         tx = 15
@@ -7268,8 +7396,7 @@ class NoteApp(object):
             # 间隔 10px ≈ 一个半角字符宽（v1.9.9.3：用户反馈时间与标题之间
             # 空太多——draw_row 曾把这个宽度又加了一遍，间隔翻倍）
             tx += self.text_width(tshow, self.f_small) + 10
-        dur = t.get("dur")
-        dur_txt = tr("spent", d=dur) if dur else ""
+        dur_txt = self._dur_text(t)
         dw = self.text_width(dur_txt, self.f_tiny) if dur_txt else 0
         # 用时文字过长会把标题挤没了：封顶 88px，超出改省略
         # （v1.9.9.3：旧封顶 64px，「用时：1分钟」≈70px 也被截成省略号；
@@ -8203,6 +8330,10 @@ class NoteApp(object):
         # v1.9.9.35：修改截止时间——内容能改、时间也必须能改
         m.add_command(label=tr("menu_time"),
                       command=lambda: self._menu_time(tid))
+        # v1.9.9.61：右键直接开始正计时——不用先开时钟再找关联任务
+        if task is not None and not task.get("done"):
+            m.add_command(label=tr("menu_timer"),
+                          command=lambda: self._start_task_timer(tid))
         # 手动调整优先级
         # v1.9.9.59：日常任务不参与优先级（详情窗 v1.9.9.48 起就不显示），
         # 右键菜单里的「调整优先级」也去掉——日常就是固定的青色竖条
@@ -8427,8 +8558,11 @@ class NoteApp(object):
         if not getattr(self, "_clock_inited", False):
             self._sw_running = False
             self._sw_t0 = 0.0
-            self._sw_base = 0.0
-            self._sw_task = None              # 关联的任务 id
+            # v1.9.9.61：正计时从 store 恢复——计时途中关掉软件会自动
+            # 暂停并把累计时长存盘（见 quit），下次打开时钟/重新关联
+            # 同一个任务时显示之前的时长，而不是从 0 开始
+            self._sw_base = float(getattr(self.store, "sw_base", 0.0) or 0.0)
+            self._sw_task = getattr(self.store, "sw_task", "") or None
             self._cd_until = None
             self._cd_secs = 60.0              # 上次倒计时的秒数（重新计时用）
             self._cd_left = None              # 暂停时剩余秒数（v1.9.9.8）
@@ -8463,14 +8597,8 @@ class NoteApp(object):
                                   activeforeground="white")
         # 关联任务后才显示
         self._clock_widgets.append(self._fin_btn)
-        menu = tk.Menu(mk, tearoff=0, bg=C.BG, fg=C.TEXT)
-        menu.add_command(label=tr("clock_min") if False else "—", state="disabled")
-        for t in self.store.tasks:
-            if not t.get("done"):
-                menu.add_command(label=t["title"],
-                                 command=lambda tid=t["id"], tt=t["title"]:
-                                 self._link_task(tid, tt))
-        mk.config(menu=menu)
+        self._link_menu_btn = mk
+        self._rebuild_link_menu()
         for txt, fn in ((tr("clock_start"), self._sw_toggle),
                         (tr("clock_reset"), self._sw_reset)):
             b = tk.Button(swf, text=txt, bg=C.ROW2, fg=C.TEXT, relief="flat",
@@ -8622,8 +8750,103 @@ class NoteApp(object):
         except Exception:
             pass
 
+    def _start_task_timer(self, tid):
+        """右键「开始计时」（v1.9.9.61）：关联任务 + 打开/唤回时钟 +
+        立刻开始正计时，一条龙完成。"""
+        task = None
+        for t in self.store.tasks:
+            if t["id"] == tid:
+                task = t
+                break
+        if task is None:
+            return
+        if task.get("done"):
+            self.push_dual("bot", i18n.render("timer_done_task",
+                                              dict(t=task["title"]), "zh"),
+                           i18n.render("timer_done_task",
+                                       dict(t=task["title"]), "en"))
+            return
+        win = getattr(self, "_clock_win", None)
+        if win is None or not win.winfo_exists() or \
+                win.wm_state() in ("iconic", "withdrawn"):
+            self.open_clock()
+        else:
+            self._popup_raise(win)
+        self._link_task(tid, task["title"])
+        if not getattr(self, "_sw_running", False):
+            self._sw_toggle()
+        self.push_dual("bot",
+                       i18n.render("timer_started", dict(t=task["title"]), "zh"),
+                       i18n.render("timer_started", dict(t=task["title"]), "en"))
+
+    def _rebuild_link_menu(self):
+        """时钟「关联任务」清单实时重建（v1.9.9.61）。
+
+        旧版只在开窗那一刻抓一次快照：计时期间把任务打勾/删掉，清单里
+        还躺着它，用户看着像没生效。现在 refresh_tasks 每次都重建；
+        关联的任务没了（完成/删除）就自动解除关联并停表落盘。"""
+        mk = getattr(self, "_link_menu_btn", None)
+        if mk is None or not mk.winfo_exists():
+            return
+        menu = tk.Menu(mk, tearoff=0, bg=C.BG, fg=C.TEXT)
+        menu.add_command(label="—", state="disabled")
+        alive = False
+        for t in self.store.tasks:
+            if t.get("done"):
+                continue
+            if t["id"] == getattr(self, "_sw_task", None):
+                alive = True
+            menu.add_command(label=t["title"],
+                             command=lambda tid=t["id"], tt=t["title"]:
+                             self._link_task(tid, tt))
+        mk.config(menu=menu)
+        # 关联的任务已完成/删除：解除关联、停表并把已跑时长写进任务
+        if not alive and getattr(self, "_sw_task", None):
+            tid = self._sw_task
+            if getattr(self, "_sw_running", False):
+                try:
+                    self._sw_base += time.time() - self._sw_t0
+                except Exception:
+                    pass
+                self._sw_running = False
+                self._sw_t0 = 0.0
+            mins = int(self._sw_base // 60)
+            if mins >= 1:
+                self._sw_write_dur(tid, mins)
+            self._sw_base = 0.0
+            self._sw_task = None
+            self._sw_sync()
+            try:
+                self._fin_btn.pack_forget()
+                self._setw("_link_lbl", text="")
+                self._setw("_sw_btn", text=tr("clock_start"))
+                self._setw("_sw_lbl", text=tr("clock_sw") + "  00:00")
+            except Exception:
+                pass
+
     def _link_task(self, tid, title):
+        # v1.9.9.61：换关联对象前，把旧任务跑着的计时停掉并写进它的「用时」；
+        # 重新关联上次暂停的任务时，秒表直接显示之前的累计时长
+        prev = getattr(self, "_sw_task", None)
+        if prev and prev != tid:
+            if getattr(self, "_sw_running", False):
+                try:
+                    self._sw_base += time.time() - self._sw_t0
+                except Exception:
+                    pass
+                self._sw_running = False
+                self._sw_t0 = 0.0
+            if self._sw_base >= 60:
+                self._sw_write_dur(prev, int(self._sw_base // 60))
+            saved = float(getattr(self.store, "sw_base", 0.0) or 0.0)
+            saved_t = getattr(self.store, "sw_task", "")
+            self._sw_base = saved if (saved_t == tid and saved > 0.5) else 0.0
+        elif not prev:
+            saved_t = getattr(self.store, "sw_task", "")
+            if saved_t == tid:
+                self._sw_base = float(getattr(self.store, "sw_base", 0.0) or 0.0)
         self._sw_task = tid
+        self._sw_sync()
         self._setw("_link_lbl", text=tr("clock_linked", t=title))
         try:
             self._fin_btn.pack(side="right", padx=(4, 0), before=self._sw_lbl)
@@ -8711,32 +8934,47 @@ class NoteApp(object):
         v = round(secs / 60.0, 3)
         return ("%g" % v) if v else "0"
 
+    def _sw_write_dur(self, tid, mins, silent=False):
+        """把累计分钟数写进任务的「用时」字段（v1.9.9.61 抽出复用）"""
+        for t in self.store.tasks:
+            if t["id"] == tid:
+                t["dur"] = "%d%s" % (mins, tr("clock_min"))
+                t["dur_min"] = mins
+                self.store.save()
+                self.refresh_tasks()
+                if silent:
+                    return
+                def _cw(l, _m=mins, _t=t["title"]):
+                    return i18n.render("clock_wrote", dict(
+                        d="%d%s" % (_m, i18n.render("clock_min", {}, l)),
+                        t=_t), l)
+                lg = i18n.get_lang()
+                self.push_dual("bot", _cw(lg), _cw(
+                    "en" if lg == "zh" else "zh"))
+                return
+
+    def _sw_sync(self):
+        """正计时状态落盘（v1.9.9.61）——退出/换任务/停表时都同步一份"""
+        try:
+            self.store.sw_base = float(getattr(self, "_sw_base", 0.0) or 0.0)
+            self.store.sw_task = getattr(self, "_sw_task", "") or ""
+        except Exception:
+            pass
+
     def _sw_toggle(self):
         if self._sw_running:
             self._sw_base += time.time() - self._sw_t0
             self._sw_running = False
             self._setw("_sw_btn", text=tr("clock_start"))
+            self._sw_sync()
             # 停止时把实际时长写进关联任务
             mins = int(self._sw_base // 60)
             if self._sw_task and mins >= 1:
-                for t in self.store.tasks:
-                    if t["id"] == self._sw_task:
-                        t["dur"] = "%d%s" % (mins, tr("clock_min"))
-                        t["dur_min"] = mins
-                        self.store.save()
-                        self.refresh_tasks()
-
-                        def _cw(l, _m=mins, _t=t["title"]):
-                            return i18n.render("clock_wrote", dict(
-                                d="%d%s" % (_m, i18n.render("clock_min", {}, l)),
-                                t=_t), l)
-                        lg = i18n.get_lang()
-                        self.push_dual("bot", _cw(lg), _cw(
-                            "en" if lg == "zh" else "zh"))
-                        break
+                self._sw_write_dur(self._sw_task, mins)
         else:
             self._sw_t0 = time.time()
             self._sw_running = True
+            self._sw_sync()
             self._setw("_sw_btn", text=tr("clock_pause"))
 
     def _sw_finish(self):
@@ -8754,6 +8992,7 @@ class NoteApp(object):
                 break
         self._sw_reset()
         self._sw_task = None
+        self._sw_sync()
         try:
             self._fin_btn.pack_forget()
             self._setw("_link_lbl", text="")
@@ -8788,6 +9027,7 @@ class NoteApp(object):
     def _sw_reset(self):
         self._sw_running = False
         self._sw_base = 0.0
+        self._sw_sync()
         self._setw("_sw_lbl", text=tr("clock_sw") + "  00:00")
 
     def _cd_total_text(self, secs):
@@ -9516,7 +9756,7 @@ class NoteApp(object):
     def open_calendar_view(self):
         win = getattr(self, "_cal_win", None)
         if win is not None and win.winfo_exists():
-            self._popup_raise(win)
+            self._popup_toggle(win)
             return
         win = tk.Toplevel(self.root)
         self._cal_win = win
@@ -9681,6 +9921,11 @@ class NoteApp(object):
             if ds == today_s:
                 cv.create_rectangle(x0 + 4, y0 + 2, x0 + cw - 4, y0 + ch - 4,
                                     fill=C.ACCENT, outline="", stipple="gray25")
+            # v1.9.9.61：点选中的日期画描边框——旧版点哪天除了底栏换字
+            # 毫无反馈，用户不知道点没点上
+            if ds == getattr(self, "_cal_sel_day", None):
+                cv.create_rectangle(x0 + 4, y0 + 2, x0 + cw - 4, y0 + ch - 4,
+                                    outline=C.ACCENT, width=2)
             hol, fest = cn_holidays.get(ds)
             # v1.9.9.48：休/班角标跟语言走（英文界面不再冒出中文）
             _off_txt = tr("cal_off_day")
@@ -9724,6 +9969,14 @@ class NoteApp(object):
                     cv.create_oval(_xc - 2.5, _yc - 2.5, _xc + 2.5, _yc + 2.5,
                                    fill=C.ACCENT, outline="", tags=(tag,))
             # 点击日期 -> 底部显示当天安排
+            # v1.9.9.61：按压先画瞬时底色（点击即有反应），松开定格为选中框
+            cv.tag_bind(tag, "<ButtonPress-1>",
+                        lambda e, tg=tag, x0=x0, y0=y0, cw=cw, ch=ch:
+                        cv.create_rectangle(x0 + 4, y0 + 2, x0 + cw - 4,
+                                            y0 + ch - 4, fill=C.ACCENT,
+                                            outline="", stipple="gray25",
+                                            tags=("press_flash",))
+                        if cv.winfo_exists() else None)
             cv.tag_bind(tag, "<Button-1>",
                         lambda e, dd=ds: self._cal_show_day(dd))
 
@@ -9843,6 +10096,28 @@ class NoteApp(object):
         except Exception:
             pass
 
+    def _popup_toggle(self, win):
+        """已开的弹窗再点一次底栏按钮（v1.9.9.61）：
+
+        最小化 / 隐藏 / 被别的窗口盖住 → 唤回到最上层（v60 行为）；
+        已经在最上层 → 收到后台隐藏，再点一次再唤回——和时钟、
+        气泡一样是「开/关」手感，不用去找窗口的 ×。"""
+        try:
+            if not win.winfo_exists():
+                return
+            try:
+                if win.wm_state() in ("iconic", "withdrawn") or                         not self._is_on_top(win):
+                    self._popup_raise(win)
+                    return
+            except Exception:
+                pass
+            try:
+                win.withdraw()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def _is_on_top(self, win):
         """窗口是否已经在最上层（v1.9.9.60）
 
@@ -9884,7 +10159,8 @@ class NoteApp(object):
     def open_daily_manager(self):
         win = getattr(self, "_dmgr_win", None)
         if win is not None and win.winfo_exists():
-            self._popup_raise(win)
+            # v1.9.9.61：开/关切换——在最上层就收进后台，被盖住/最小化就唤回
+            self._popup_toggle(win)
             self._render_daily_manager()
             return
         win = tk.Toplevel(self.root)
@@ -10003,6 +10279,15 @@ class NoteApp(object):
             d = dt.date.fromisoformat(ds)
         except ValueError:
             return
+        # v1.9.9.61：选中框 + 清掉按压瞬时的底色
+        self._cal_sel_day = ds
+        cv = getattr(self, "_cal_cv", None)
+        if cv is not None and cv.winfo_exists():
+            try:
+                cv.delete("press_flash")
+            except Exception:
+                pass
+            self._draw_calendar()
         hol, fest = cn_holidays.get(ds)
         parts = []
         if i18n.is_en():
@@ -10036,7 +10321,7 @@ class NoteApp(object):
         self.store.sync_history()
         win = self._hist_win
         if win is not None and win.winfo_exists():
-            self._popup_raise(win)
+            self._popup_toggle(win)
             self._render_history()
             return
 
@@ -10150,7 +10435,7 @@ class NoteApp(object):
         # v1.9.9.60：已开着就置顶还原，不再叠一个新窗
         old = getattr(self, "_restore_win", None)
         if old is not None and old.winfo_exists():
-            self._popup_raise(old)
+            self._popup_toggle(old)
             return
         try:
             import exporter as _exp
